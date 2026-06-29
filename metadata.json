@@ -1,0 +1,6 @@
+{
+  "name": "Secure Chat",
+  "description": "A secure real-time messaging and group chat platform featuring client-side end-to-end encryption, voice messages, media sharing, and an adaptive dark mode interface.",
+  "requestFramePermissions": ["microphone", "camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
