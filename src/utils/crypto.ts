@@ -14,12 +14,28 @@ export function arrayBufferToBase64(buffer: ArrayBuffer): string {
 }
 
 export function base64ToArrayBuffer(base64: string): ArrayBuffer {
-  const binaryString = atob(base64);
-  const bytes = new Uint8Array(binaryString.length);
-  for (let i = 0; i < binaryString.length; i++) {
-    bytes[i] = binaryString.charCodeAt(i);
+  try {
+    if (!base64) {
+      return new ArrayBuffer(0);
+    }
+    // Handle data URL input (e.g. data:image/png;base64,...)
+    let cleanBase64 = base64;
+    if (base64.includes("base64,")) {
+      cleanBase64 = base64.split("base64,")[1];
+    }
+    // Remove any trailing/leading whitespace and newlines
+    cleanBase64 = cleanBase64.replace(/\s/g, "").trim();
+
+    const binaryString = atob(cleanBase64);
+    const bytes = new Uint8Array(binaryString.length);
+    for (let i = 0; i < binaryString.length; i++) {
+      bytes[i] = binaryString.charCodeAt(i);
+    }
+    return bytes.buffer;
+  } catch (err) {
+    console.warn("base64ToArrayBuffer failed to parse base64 string safely:", err);
+    return new ArrayBuffer(0);
   }
-  return bytes.buffer;
 }
 
 // Generate standard RSA-OAEP Key Pair for the user

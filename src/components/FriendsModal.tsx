@@ -313,7 +313,14 @@ export default function FriendsModal({
                         </div>
                         <div className="min-w-0">
                           <p className="text-sm font-semibold text-slate-100 truncate">@{friend.username}</p>
-                          <p className="text-[10px] text-slate-500 capitalize">{friend.status}</p>
+                          <div className="flex flex-col gap-0.5">
+                            <span className="text-[10px] text-slate-500 capitalize leading-none">{friend.status}</span>
+                            {friend.statusMessage && (
+                              <p className="text-[11px] text-slate-400 italic truncate max-w-[200px] mt-0.5" title={friend.statusMessage}>
+                                "{friend.statusMessage}"
+                              </p>
+                            )}
+                          </div>
                         </div>
                       </div>
 

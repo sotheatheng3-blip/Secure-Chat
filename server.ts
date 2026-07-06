@@ -65,7 +65,7 @@ async function startServer() {
   const activeCalls: Record<string, any> = {};
 
   // Map of connection ID to socket plus metadata
-  const activeConnections = new Map<string, { socket: WebSocket; username?: string; publicKey?: string; avatar?: string }>();
+  const activeConnections = new Map<string, { socket: WebSocket; username?: string; publicKey?: string; avatar?: string; statusMessage?: string }>();
 
   wss.on("connection", (ws) => {
     const connId = Math.random().toString(36).substring(2, 9);
@@ -81,11 +81,16 @@ async function startServer() {
             const { username, publicKey, avatar } = payload;
             if (!username) return;
 
+            const userAcc = Object.values(userAccounts).find(u => u.username.toLowerCase() === username.toLowerCase());
+            const latestAvatar = userAcc?.avatar || avatar || "🦊";
+            const latestStatusMessage = userAcc?.statusMessage || "";
+
             const conn = activeConnections.get(connId);
             if (conn) {
               conn.username = username;
               conn.publicKey = publicKey;
-              conn.avatar = avatar || "🦊";
+              conn.avatar = latestAvatar;
+              conn.statusMessage = latestStatusMessage;
             }
 
             // Send all current rooms to the registering client
@@ -110,21 +115,26 @@ async function startServer() {
               rooms: roomList
             }));
 
-            // Sync other users' keys and avatars
+            // Sync other users' keys, avatars, and status messages
             const activeKeys: Record<string, string> = {};
             const activeAvatars: Record<string, string> = {};
+            const activeStatusMessages: Record<string, string> = {};
             for (const [_, c] of activeConnections.entries()) {
               if (c.username && c.publicKey) {
                 activeKeys[c.username] = c.publicKey;
                 if (c.avatar) {
                   activeAvatars[c.username] = c.avatar;
                 }
+                if (c.statusMessage) {
+                  activeStatusMessages[c.username] = c.statusMessage;
+                }
               }
             }
             ws.send(JSON.stringify({
               type: "sync:active_keys",
               keys: activeKeys,
-              avatars: activeAvatars
+              avatars: activeAvatars,
+              statusMessages: activeStatusMessages
             }));
 
             // Broadcast user presence to other clients
@@ -132,8 +142,9 @@ async function startServer() {
               type: "user:presence",
               username,
               publicKey,
-              avatar: avatar || "🦊",
-              status: "online"
+              avatar: latestAvatar,
+              status: "online",
+              statusMessage: latestStatusMessage
             });
             break;
           }
@@ -269,6 +280,53 @@ async function startServer() {
                 messages: messages[roomId]
               });
             }
+            break;
+          }
+
+          case "message:edit": {
+            const { roomId, messageId, text, username } = payload;
+            if (!rooms[roomId]) return;
+
+            const roomMsgs = messages[roomId] || [];
+            const msg = roomMsgs.find(m => m.id === messageId);
+            if (!msg) return;
+
+            // Only allow sender to edit
+            if (msg.sender !== username) return;
+
+            msg.ciphertext = text;
+            msg.isEdited = true;
+
+            broadcastToRoom(roomId, {
+              type: "message:edited",
+              roomId,
+              messageId,
+              text,
+              isEdited: true
+            });
+            break;
+          }
+
+          case "message:delete": {
+            const { roomId, messageId, username } = payload;
+            if (!rooms[roomId]) return;
+
+            const roomMsgs = messages[roomId] || [];
+            const msg = roomMsgs.find(m => m.id === messageId);
+            if (!msg) return;
+
+            // Only allow sender to delete
+            if (msg.sender !== username) return;
+
+            msg.ciphertext = "This message was deleted";
+            msg.isDeleted = true;
+
+            broadcastToRoom(roomId, {
+              type: "message:deleted",
+              roomId,
+              messageId,
+              isDeleted: true
+            });
             break;
           }
 
@@ -463,18 +521,23 @@ async function startServer() {
           case "user:get_active_keys": {
             const activeKeys: Record<string, string> = {};
             const activeAvatars: Record<string, string> = {};
+            const activeStatusMessages: Record<string, string> = {};
             for (const [_, c] of activeConnections.entries()) {
               if (c.username && c.publicKey) {
                 activeKeys[c.username] = c.publicKey;
                 if (c.avatar) {
                   activeAvatars[c.username] = c.avatar;
                 }
+                if (c.statusMessage) {
+                  activeStatusMessages[c.username] = c.statusMessage;
+                }
               }
             }
             ws.send(JSON.stringify({
               type: "sync:active_keys",
               keys: activeKeys,
-              avatars: activeAvatars
+              avatars: activeAvatars,
+              statusMessages: activeStatusMessages
             }));
             break;
           }
@@ -552,7 +615,8 @@ async function startServer() {
   }
 
   // Setup APIs
-  app.use(express.json());
+  app.use(express.json({ limit: "50mb" }));
+  app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
   // In-memory persistent user accounts
   const userAccounts: Record<string, {
@@ -563,6 +627,7 @@ async function startServer() {
     avatar: string;
     rsaPublicKeyJwk: string;
     rsaPrivateKeyJwk: string;
+    statusMessage?: string;
   }> = {};
 
   // In-memory friendship system
@@ -626,7 +691,8 @@ async function startServer() {
         salt,
         avatar,
         rsaPublicKeyJwk: rsaPublicKeyJwk || "none",
-        rsaPrivateKeyJwk: rsaPrivateKeyJwk || "none"
+        rsaPrivateKeyJwk: rsaPrivateKeyJwk || "none",
+        statusMessage: ""
       };
 
       res.json({
@@ -636,7 +702,8 @@ async function startServer() {
           username: normalizedUsername,
           avatar,
           rsaPublicKeyJwk: rsaPublicKeyJwk || "none",
-          rsaPrivateKeyJwk: rsaPrivateKeyJwk || "none"
+          rsaPrivateKeyJwk: rsaPrivateKeyJwk || "none",
+          statusMessage: ""
         }
       });
     } catch (err) {
@@ -671,7 +738,8 @@ async function startServer() {
           username: account.username,
           avatar: account.avatar,
           rsaPublicKeyJwk: account.rsaPublicKeyJwk,
-          rsaPrivateKeyJwk: account.rsaPrivateKeyJwk
+          rsaPrivateKeyJwk: account.rsaPrivateKeyJwk,
+          statusMessage: account.statusMessage || ""
         }
       });
     } catch (err) {
@@ -680,10 +748,105 @@ async function startServer() {
     }
   });
 
+  // Google Authentication endpoint
+  app.post("/api/auth/google", (req, res) => {
+    try {
+      const { email, displayName, photoURL } = req.body;
+      if (!email) {
+        return res.status(400).json({ error: "Missing required Google auth email." });
+      }
+
+      const normalizedEmail = email.trim().toLowerCase();
+      // Derive username from displayName or email
+      let derivedUsername = "";
+      if (displayName) {
+        derivedUsername = displayName.trim().replace(/\s+/g, "").slice(0, 15);
+      } else {
+        derivedUsername = normalizedEmail.split("@")[0].slice(0, 15);
+      }
+      
+      // Ensure username is clean alphanumeric
+      derivedUsername = derivedUsername.replace(/[^a-zA-Z0-9_]/g, "");
+      if (!derivedUsername) {
+        derivedUsername = "User" + Math.floor(1000 + Math.random() * 9000);
+      }
+
+      let account = userAccounts[normalizedEmail];
+      if (!account) {
+        // If username is taken, make it unique
+        let finalUsername = derivedUsername;
+        let suffix = 1;
+        while (Object.values(userAccounts).some(u => u.username.toLowerCase() === finalUsername.toLowerCase())) {
+          finalUsername = derivedUsername.slice(0, 15 - String(suffix).length) + suffix;
+          suffix++;
+        }
+
+        const salt = generateSalt();
+        const passwordHash = hashPassword(Math.random().toString(36), salt); // Dummy random password
+
+        account = {
+          email: normalizedEmail,
+          username: finalUsername,
+          passwordHash,
+          salt,
+          avatar: photoURL || "🦊",
+          rsaPublicKeyJwk: "none",
+          rsaPrivateKeyJwk: "none",
+          statusMessage: ""
+        };
+        userAccounts[normalizedEmail] = account;
+      }
+
+      res.json({
+        success: true,
+        user: {
+          email: account.email,
+          username: account.username,
+          avatar: account.avatar,
+          rsaPublicKeyJwk: account.rsaPublicKeyJwk,
+          rsaPrivateKeyJwk: account.rsaPrivateKeyJwk,
+          statusMessage: account.statusMessage || ""
+        }
+      });
+    } catch (err) {
+      console.error("Google Auth API error:", err);
+      res.status(500).json({ error: "Internal server error during Google Authentication." });
+    }
+  });
+
+  // Firebase Auth Email/Password profile sync endpoint
+  app.post("/api/auth/firebase-login", (req, res) => {
+    try {
+      const { email } = req.body;
+      if (!email) {
+        return res.status(400).json({ error: "Missing email address for profile sync." });
+      }
+      const normalizedEmail = email.trim().toLowerCase();
+      const account = userAccounts[normalizedEmail];
+      if (!account) {
+        return res.status(404).json({ error: "Registered profile not found on sync server." });
+      }
+      res.json({
+        success: true,
+        user: {
+          email: account.email,
+          username: account.username,
+          avatar: account.avatar,
+          rsaPublicKeyJwk: account.rsaPublicKeyJwk,
+          rsaPrivateKeyJwk: account.rsaPrivateKeyJwk,
+          statusMessage: account.statusMessage || ""
+        }
+      });
+    } catch (err) {
+      console.error("Firebase Login API error:", err);
+      res.status(500).json({ error: "Internal server error during Firebase profile retrieval." });
+    }
+  });
+
   // Update profile endpoint
   app.post("/api/auth/update-profile", (req, res) => {
     try {
-      const { email, username, avatar, oldPassword, newPassword } = req.body;
+      const { email, username, avatar, oldPassword, newPassword, statusMessage } = req.body;
       if (!email) {
         return res.status(400).json({ error: "Email parameter is required to identify identity." });
       }
@@ -700,7 +863,8 @@ async function startServer() {
           salt,
           avatar: avatar || "🦊",
           rsaPublicKeyJwk: rsaPublicKeyJwk || "none",
-          rsaPrivateKeyJwk: rsaPrivateKeyJwk || "none"
+          rsaPrivateKeyJwk: rsaPrivateKeyJwk || "none",
+          statusMessage: statusMessage !== undefined ? statusMessage.slice(0, 60) : ""
         };
         account = userAccounts[normalizedEmail];
       }
@@ -737,10 +901,25 @@ async function startServer() {
         account.avatar = avatar;
       }
 
+      if (statusMessage !== undefined) {
+        account.statusMessage = statusMessage.slice(0, 60);
+      }
+
       // Also proactively update metadata on the active Websocket connections if they exist
       for (const [_, c] of activeConnections.entries()) {
         if (c.username && c.username === account.username) {
           c.avatar = account.avatar;
+          c.statusMessage = account.statusMessage || "";
+
+          // Broadcast updated presence to let everyone know immediately
+          broadcast({
+            type: "user:presence",
+            username: account.username,
+            publicKey: c.publicKey || "none",
+            avatar: account.avatar,
+            status: "online",
+            statusMessage: account.statusMessage || ""
+          });
         }
       }
 
@@ -751,7 +930,8 @@ async function startServer() {
           username: account.username,
           avatar: account.avatar,
           rsaPublicKeyJwk: account.rsaPublicKeyJwk,
-          rsaPrivateKeyJwk: account.rsaPrivateKeyJwk
+          rsaPrivateKeyJwk: account.rsaPrivateKeyJwk,
+          statusMessage: account.statusMessage || ""
         }
       });
     } catch (err) {
@@ -874,7 +1054,8 @@ async function startServer() {
         return {
           username: fAcc?.username || fName,
           avatar: fAcc?.avatar || "🦊",
-          status: isOnline ? "online" : "offline"
+          status: isOnline ? "online" : "offline",
+          statusMessage: fAcc?.statusMessage || ""
         };
       });
       

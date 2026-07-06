@@ -24,6 +24,7 @@ interface SidebarProps {
   onClearCallHistory: () => void;
   activeTab?: "chats" | "calls";
   onTabChange?: (tab: "chats" | "calls") => void;
+  typingUsersRecord?: Record<string, string[]>;
 }
 
 const formatCallTimestamp = (timestamp: number) => {
@@ -74,6 +75,7 @@ export default function Sidebar({
   onClearCallHistory,
   activeTab: controlledActiveTab,
   onTabChange,
+  typingUsersRecord = {},
 }: SidebarProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [localActiveTab, setLocalActiveTab] = useState<"chats" | "calls">("chats");
@@ -365,6 +367,8 @@ export default function Sidebar({
                 ) : (
                   filteredGroupChannels.map((room) => {
                     const active = room.id === activeRoomId;
+                    const roomTypingUsers = typingUsersRecord?.[room.id] || [];
+                    const isSomeoneTyping = roomTypingUsers.length > 0;
                     return (
                       <button
                         key={room.id}
@@ -382,17 +386,29 @@ export default function Sidebar({
                               alt={room.name}
                               className="w-10 h-10 rounded-full object-cover shadow-md shrink-0 border border-slate-800/40"
                               referrerPolicy="no-referrer"
+                              id={`channel-avatar-${room.id}`}
                             />
                           ) : (
-                            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-cyan-400 to-blue-500 flex items-center justify-center text-xs font-bold text-white shadow-md shrink-0 uppercase">
+                            <div className="w-10 h-10 rounded-full bg-gradient-to-br from-cyan-400 to-blue-500 flex items-center justify-center text-xs font-bold text-white shadow-md shrink-0 uppercase" id={`channel-avatar-${room.id}`}>
                               {room.name.slice(0, 2)}
                             </div>
                           )}
-                          <div className="min-w-0">
+                          <div className="min-w-0 flex-1">
                             <span className="text-sm font-semibold truncate block text-slate-200">{room.name}</span>
-                            <span className={`text-[10px] ${theme.accentTextMuted} truncate block flex items-center gap-1`}>
-                              {room.privacy === "private" ? "🔒 Private Group" : "🌐 Public Group"}
-                            </span>
+                            {isSomeoneTyping ? (
+                              <span className="text-[10px] text-emerald-400 truncate block animate-pulse font-semibold flex items-center gap-1">
+                                <span className="flex gap-0.5 items-center shrink-0">
+                                  <span className="h-1 w-1 rounded-full bg-emerald-400 animate-bounce" style={{ animationDelay: '0ms', animationDuration: '0.8s' }}></span>
+                                  <span className="h-1 w-1 rounded-full bg-emerald-400 animate-bounce" style={{ animationDelay: '150ms', animationDuration: '0.8s' }}></span>
+                                  <span className="h-1 w-1 rounded-full bg-emerald-400 animate-bounce" style={{ animationDelay: '300ms', animationDuration: '0.8s' }}></span>
+                                </span>
+                                {roomTypingUsers.join(", ")} {roomTypingUsers.length === 1 ? "is" : "are"} typing...
+                              </span>
+                            ) : (
+                              <span className={`text-[10px] ${theme.accentTextMuted} truncate block flex items-center gap-1`}>
+                                {room.privacy === "private" ? "🔒 Private Group" : "🌐 Public Group"}
+                              </span>
+                            )}
                           </div>
                         </div>
                       </button>
@@ -423,6 +439,8 @@ export default function Sidebar({
                       .replace(currentUsername, "")
                       .replace("&", "")
                       .trim();
+                    const roomTypingUsers = typingUsersRecord?.[room.id] || [];
+                    const isSomeoneTyping = roomTypingUsers.length > 0;
 
                     return (
                       <button
@@ -435,12 +453,23 @@ export default function Sidebar({
                         }`}
                       >
                         <div className="flex items-center gap-3 min-w-0">
-                          <div className="w-10 h-10 rounded-full bg-slate-700/80 flex items-center justify-center text-xs font-bold text-slate-300 shadow-sm shrink-0 uppercase border border-slate-600/50">
+                          <div className="w-10 h-10 rounded-full bg-slate-700/80 flex items-center justify-center text-xs font-bold text-slate-300 shadow-sm shrink-0 uppercase border border-slate-600/50" id={`dm-avatar-${room.id}`}>
                             {displayFriend.slice(0, 2)}
                           </div>
-                          <div className="min-w-0">
+                          <div className="min-w-0 flex-1">
                             <span className="text-sm font-semibold truncate block text-slate-200">{displayFriend}</span>
-                            <span className={`text-[10px] ${theme.accentTextMuted} truncate block`}>Direct Message</span>
+                            {isSomeoneTyping ? (
+                              <span className="text-[10px] text-emerald-400 truncate block animate-pulse font-semibold flex items-center gap-1">
+                                <span className="flex gap-0.5 items-center shrink-0">
+                                  <span className="h-1 w-1 rounded-full bg-emerald-400 animate-bounce" style={{ animationDelay: '0ms', animationDuration: '0.8s' }}></span>
+                                  <span className="h-1 w-1 rounded-full bg-emerald-400 animate-bounce" style={{ animationDelay: '150ms', animationDuration: '0.8s' }}></span>
+                                  <span className="h-1 w-1 rounded-full bg-emerald-400 animate-bounce" style={{ animationDelay: '300ms', animationDuration: '0.8s' }}></span>
+                                </span>
+                                typing...
+                              </span>
+                            ) : (
+                              <span className={`text-[10px] ${theme.accentTextMuted} truncate block`}>Direct Message</span>
+                            )}
                           </div>
                         </div>
                       </button>
@@ -478,35 +507,42 @@ export default function Sidebar({
                         return (
                           <div
                             key={user.username}
-                            className={`flex items-center justify-between p-2 rounded-xl border text-xs transition-all ${
+                            className={`flex flex-col p-2 rounded-xl border text-xs transition-all gap-1 ${
                               isOnline
                                 ? `bg-black/20 border-slate-800/40 text-slate-300`
                                 : `bg-black/10 border-transparent text-slate-500 opacity-55`
                             }`}
                           >
-                            <div className="flex items-center gap-2 min-w-0">
-                              <span className={`text-sm shrink-0 leading-none w-5 h-5 rounded-full overflow-hidden flex items-center justify-center ${!isOnline ? "grayscale filter contrast-75" : ""}`}>
-                                {user.avatar && (user.avatar.startsWith("data:image") || user.avatar.startsWith("http")) ? (
-                                  <img src={user.avatar} alt={user.username} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                                ) : (
-                                  user.avatar || "🦊"
-                                )}
-                              </span>
-                              <span className="truncate max-w-40 font-medium">
-                                {user.username}
-                              </span>
-                              {user.username === currentUsername && (
-                                <span className={`text-[9px] ${theme.accentText} ${theme.accentBgMuted} border ${theme.accentBorderMuted} px-1 rounded`}>
-                                  you
+                            <div className="flex items-center justify-between w-full min-w-0">
+                              <div className="flex items-center gap-2 min-w-0">
+                                <span className={`text-sm shrink-0 leading-none w-5 h-5 rounded-full overflow-hidden flex items-center justify-center ${!isOnline ? "grayscale filter contrast-75" : ""}`}>
+                                  {user.avatar && (user.avatar.startsWith("data:image") || user.avatar.startsWith("http")) ? (
+                                    <img src={user.avatar} alt={user.username} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                                  ) : (
+                                    user.avatar || "🦊"
+                                  )}
                                 </span>
-                              )}
+                                <span className="truncate max-w-28 font-medium">
+                                  {user.username}
+                                </span>
+                                {user.username === currentUsername && (
+                                  <span className={`text-[9px] ${theme.accentText} ${theme.accentBgMuted} border ${theme.accentBorderMuted} px-1 rounded`}>
+                                    you
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <span className={`w-1.5 h-1.5 rounded-full ${isOnline ? "bg-emerald-500 animate-pulse" : "bg-slate-705/80 bg-slate-600"}`} />
+                                <span className="text-[9px] font-semibold text-slate-500 font-mono">
+                                  {isOnline ? "Active" : "Offline"}
+                                </span>
+                              </div>
                             </div>
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <span className={`w-1.5 h-1.5 rounded-full ${isOnline ? "bg-emerald-500 animate-pulse" : "bg-slate-705/80 bg-slate-600"}`} />
-                              <span className="text-[9px] font-semibold text-slate-500 font-mono">
-                                {isOnline ? "Active" : "Offline"}
-                              </span>
-                            </div>
+                            {user.statusMessage && (
+                              <p className="text-[10px] text-slate-400 italic px-7 truncate max-w-full" title={user.statusMessage}>
+                                "{user.statusMessage}"
+                              </p>
+                            )}
                           </div>
                         );
                       })}

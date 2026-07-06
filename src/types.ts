@@ -4,6 +4,7 @@ export interface User {
   publicKey?: string; // String representation of RSA Public JWK
   avatar?: string;
   email?: string;
+  statusMessage?: string;
 }
 
 export interface Room {
@@ -43,6 +44,12 @@ export interface Message {
   decryptedMediaUrl?: string; // Decrypted blob object URL in RAM
   reactions?: Record<string, string[]>; // mapping of emoji -> list of usernames
   readBy?: string[]; // list of usernames who have viewed this message
+  
+  // Edit and delete state
+  isEdited?: boolean;
+  isDeleted?: boolean;
+  isForwarded?: boolean;
+  forwardedFrom?: string;
 }
 
 export interface PollOption {
@@ -59,6 +66,7 @@ export interface Friend {
   username: string;
   avatar: string;
   status: "online" | "offline";
+  statusMessage?: string;
 }
 
 export interface FriendRequest {

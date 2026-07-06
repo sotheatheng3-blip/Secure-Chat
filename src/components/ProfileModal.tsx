@@ -3,7 +3,8 @@ import {
   X, User, Mail, Smile, Settings, Key, Lock, Palette, 
   Accessibility, Eye, VolumeX, ShieldAlert, Monitor, Check, 
   Terminal, UserCheck, EyeOff, Shield, RefreshCw, Smartphone, 
-  HelpCircle, Sparkles, MessageSquare, LayoutGrid, ArrowLeft
+  HelpCircle, Sparkles, MessageSquare, LayoutGrid, ArrowLeft,
+  Bell, Volume2
 } from "lucide-react";
 import { ThemeId, THEME_PRESETS } from "../utils/theme";
 
@@ -13,13 +14,15 @@ interface ProfileModalProps {
   email: string;
   username: string;
   avatar: string;
+  statusMessage: string;
   activeThemeId: ThemeId;
   onSelectTheme: (themeId: ThemeId) => void;
   onUpdate: (
     newUsername: string,
     newAvatar: string,
     oldPassword?: string,
-    newPassword?: string
+    newPassword?: string,
+    statusMessage?: string
   ) => Promise<void>;
   onSettingsChange?: () => void;
 }
@@ -43,16 +46,18 @@ export default function ProfileModal({
   email,
   username,
   avatar,
+  statusMessage,
   activeThemeId,
   onSelectTheme,
   onUpdate,
   onSettingsChange,
 }: ProfileModalProps) {
-  const [activeTab, setActiveTab] = useState<"menu" | "profile" | "theme" | "accessibility" | "privacy">("menu");
+  const [activeTab, setActiveTab] = useState<"menu" | "profile" | "theme" | "accessibility" | "privacy" | "notifications">("menu");
 
   // Account states
   const [newUsername, setNewUsername] = useState(username);
   const [newAvatar, setNewAvatar] = useState(avatar);
+  const [newStatusMessage, setNewStatusMessage] = useState(statusMessage || "");
   const [oldPassword, setOldPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -75,6 +80,131 @@ export default function ProfileModal({
   const [strictE2eeOnly, setStrictE2eeOnly] = useState(false);
   const [sessionAutoLock, setSessionAutoLock] = useState("never"); // 'never' | '5m' | '15m' | '30m'
 
+  // Notification States (Loaded from LocalStorage)
+  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
+  const [soundEnabled, setSoundEnabled] = useState(true);
+  const [soundPreset, setSoundPreset] = useState("chime");
+  const [soundVolume, setSoundVolume] = useState(0.5);
+  const [muteGroupNotifications, setMuteGroupNotifications] = useState(false);
+
+  const audioCtxRef = React.useRef<AudioContext | null>(null);
+
+  // Play test sound notification using synthesizer
+  const playTestSound = (preset: string, volume: number) => {
+    try {
+      if (typeof window === "undefined" || preset === "none") return;
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx.state === "suspended") {
+        ctx.resume();
+      }
+
+      if (preset === "chime") {
+        const playNote = (freq: number, delay: number, duration: number) => {
+          const osc = ctx.createOscillator();
+          const gainNode = ctx.createGain();
+          osc.type = "sine";
+          osc.frequency.value = freq;
+          
+          gainNode.gain.setValueAtTime(0, ctx.currentTime + delay);
+          gainNode.gain.linearRampToValueAtTime(0.05 * volume, ctx.currentTime + delay + 0.02);
+          gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + duration);
+          
+          osc.connect(gainNode);
+          gainNode.connect(ctx.destination);
+          
+          osc.start(ctx.currentTime + delay);
+          osc.stop(ctx.currentTime + delay + duration);
+          
+          setTimeout(() => {
+            try {
+              osc.disconnect();
+              gainNode.disconnect();
+            } catch (e) {}
+          }, (delay + duration + 0.1) * 1000);
+        };
+        
+        playNote(1318.51, 0, 0.4); // E6
+        playNote(1760.00, 0.08, 0.5); // A6
+      } else if (preset === "bloop") {
+        const osc = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(400, ctx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(1200, ctx.currentTime + 0.15);
+        
+        gainNode.gain.setValueAtTime(0.06 * volume, ctx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.15);
+        
+        osc.connect(gainNode);
+        gainNode.connect(ctx.destination);
+        
+        osc.start();
+        osc.stop(ctx.currentTime + 0.2);
+        
+        setTimeout(() => {
+          try {
+            osc.disconnect();
+            gainNode.disconnect();
+          } catch (e) {}
+        }, 300);
+      } else if (preset === "ping") {
+        const osc = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.setValueAtTime(2048, ctx.currentTime);
+        
+        gainNode.gain.setValueAtTime(0.08 * volume, ctx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.25);
+        
+        osc.connect(gainNode);
+        gainNode.connect(ctx.destination);
+        
+        osc.start();
+        osc.stop(ctx.currentTime + 0.3);
+        
+        setTimeout(() => {
+          try {
+            osc.disconnect();
+            gainNode.disconnect();
+          } catch (e) {}
+        }, 400);
+      } else if (preset === "echo") {
+        const playPingAt = (delay: number, vol: number) => {
+          const osc = ctx.createOscillator();
+          const gainNode = ctx.createGain();
+          osc.type = "sine";
+          osc.frequency.setValueAtTime(1500, ctx.currentTime + delay);
+          
+          gainNode.gain.setValueAtTime(0, ctx.currentTime + delay);
+          gainNode.gain.linearRampToValueAtTime(vol * volume, ctx.currentTime + delay + 0.01);
+          gainNode.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + delay + 0.12);
+          
+          osc.connect(gainNode);
+          gainNode.connect(ctx.destination);
+          
+          osc.start(ctx.currentTime + delay);
+          osc.stop(ctx.currentTime + delay + 0.15);
+          
+          setTimeout(() => {
+            try {
+              osc.disconnect();
+              gainNode.disconnect();
+            } catch (e) {}
+          }, (delay + 0.2) * 1000);
+        };
+        
+        playPingAt(0, 0.06);
+        playPingAt(0.12, 0.03);
+        playPingAt(0.24, 0.015);
+      }
+    } catch (err) {
+      console.warn("Failed to play notification sound:", err);
+    }
+  };
+
   // Diagnostic states
   const [currentTime, setCurrentTime] = useState("");
   const [userAgent, setUserAgent] = useState("");
@@ -95,10 +225,39 @@ export default function ProfileModal({
       setStrictE2eeOnly(localStorage.getItem("privacy_strictE2eeOnly") === "true");
       setSessionAutoLock(localStorage.getItem("privacy_sessionAutoLock") || "never");
 
+      // Load notifications
+      setNotificationsEnabled(localStorage.getItem("notifications_enabled") !== "false");
+      setSoundEnabled(localStorage.getItem("notifications_sound_enabled") !== "false");
+      setSoundPreset(localStorage.getItem("notifications_sound_preset") || "chime");
+      setSoundVolume(parseFloat(localStorage.getItem("notifications_sound_volume") || "0.5"));
+      setMuteGroupNotifications(localStorage.getItem("notifications_mute_groups") === "true");
+
       setCurrentTime(new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
       setUserAgent(navigator.userAgent);
     }
   }, [isOpen]);
+
+  // Handle saving notifications parameters
+  const updateNotifications = (key: string, value: any) => {
+    localStorage.setItem(key, String(value));
+    
+    if (key === "notifications_enabled") setNotificationsEnabled(value);
+    if (key === "notifications_sound_enabled") setSoundEnabled(value);
+    if (key === "notifications_sound_preset") setSoundPreset(value);
+    if (key === "notifications_sound_volume") setSoundVolume(value);
+    if (key === "notifications_mute_groups") setMuteGroupNotifications(value);
+
+    window.dispatchEvent(new Event("app-settings-updated"));
+    if (onSettingsChange) onSettingsChange();
+  };
+
+  const requestPermissionDirectly = async () => {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      const permission = await Notification.requestPermission();
+      return permission;
+    }
+    return "default";
+  };
 
   // Handle saving accessibility parameters
   const updateAccessibility = (key: string, value: any) => {
@@ -135,13 +294,14 @@ export default function ProfileModal({
     if (isOpen) {
       setNewUsername(username);
       setNewAvatar(avatar);
+      setNewStatusMessage(statusMessage || "");
       setOldPassword("");
       setNewPassword("");
       setConfirmPassword("");
       setErrorMsg("");
       setSuccess(false);
     }
-  }, [isOpen, username, avatar]);
+  }, [isOpen, username, avatar, statusMessage]);
 
   if (!isOpen) return null;
 
@@ -180,7 +340,8 @@ export default function ProfileModal({
         newUsername.trim(),
         newAvatar,
         oldPassword || undefined,
-        newPassword || undefined
+        newPassword || undefined,
+        newStatusMessage.trim()
       );
       setSuccess(true);
       setOldPassword("");
@@ -286,6 +447,19 @@ export default function ProfileModal({
             Privacy & Security
           </button>
 
+          <button
+            type="button"
+            onClick={() => setActiveTab("notifications")}
+            className={`flex items-center gap-2.5 px-4 py-3 text-xs font-bold rounded-2xl transition-all cursor-pointer truncate w-full ${
+              activeTab === "notifications"
+                ? "bg-indigo-500/10 text-indigo-400 border border-indigo-500/30 font-extrabold shadow-sm"
+                : "text-slate-400 hover:bg-white/5 hover:text-slate-200"
+            }`}
+          >
+            <Bell className="w-4 h-4" />
+            Notification Alerts
+          </button>
+
           <div className="mt-auto text-[10px] text-slate-500 px-3 py-2 border-t border-white/5 pt-3">
             <p>Active Node: <span className="text-emerald-400 font-mono font-bold">Secure</span></p>
             <p className="mt-1 font-mono text-[9px]">Last Sync: {currentTime}</p>
@@ -316,6 +490,7 @@ export default function ProfileModal({
                 {activeTab === "theme" && "🎨 UI Theme and Palette Layout Selector"}
                 {activeTab === "accessibility" && "♿ Inclusivity, Layout parameters, & Assistive Tech"}
                 {activeTab === "privacy" && "🔒 Enterprise Privacy controls & active sessions info"}
+                {activeTab === "notifications" && "🔔 Message Notifications & Custom Sound Alerts"}
               </h4>
             </div>
             <button
@@ -411,7 +586,7 @@ export default function ProfileModal({
                     <span className="text-[9.5px] font-bold text-slate-500 group-hover:text-yellow-500 transition-colors font-mono self-end">Configure Options &rarr;</span>
                   </button>
 
-                  {/* Card 4: Privacy & Security */}
+                   {/* Card 4: Privacy & Security */}
                   <button
                     type="button"
                     onClick={() => setActiveTab("privacy")}
@@ -432,6 +607,29 @@ export default function ProfileModal({
                       </p>
                     </div>
                     <span className="text-[9.5px] font-bold text-slate-500 group-hover:text-purple-455 transition-colors font-mono self-end">Configure Options &rarr;</span>
+                  </button>
+
+                  {/* Card 5: Notification Alerts */}
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab("notifications")}
+                    className="p-5 rounded-2xl bg-slate-900/40 border border-slate-800 hover:border-pink-500/60 hover:bg-slate-900/70 text-left transition-all cursor-pointer group flex flex-col justify-between h-40 scale-100 active:scale-[0.98] duration-150"
+                  >
+                    <div>
+                      <div className="flex items-center gap-2 mb-2.5">
+                        <div className="p-2 bg-pink-500/10 text-pink-400 rounded-xl group-hover:bg-pink-600 group-hover:text-white transition-colors shrink-0">
+                          <Bell className="w-4 h-4" />
+                        </div>
+                        <span className="text-[10px] font-extrabold uppercase font-mono tracking-wider text-pink-450">Notifications</span>
+                      </div>
+                      <h4 className="text-xs font-bold text-slate-100 group-hover:text-pink-400 transition-colors mb-1 font-display">
+                        Alert Customization & Sound
+                      </h4>
+                      <p className="text-[10.5px] text-slate-400 leading-normal line-clamp-2">
+                        Toggle system push alerts, adjust custom sound effects, or select premium notification tunes.
+                      </p>
+                    </div>
+                    <span className="text-[9.5px] font-bold text-slate-500 group-hover:text-pink-455 transition-colors font-mono self-end">Configure Options &rarr;</span>
                   </button>
                 </div>
               </div>
@@ -564,6 +762,24 @@ export default function ProfileModal({
                         ))}
                       </div>
                     </div>
+
+                    {/* Status Message */}
+                    <div className="space-y-1">
+                      <label className="text-[9px] font-bold text-slate-400 tracking-wider uppercase block">
+                        Status Message
+                      </label>
+                      <div className="relative">
+                        <input
+                          type="text"
+                          value={newStatusMessage}
+                          onChange={(e) => setNewStatusMessage(e.target.value)}
+                          placeholder="What's on your mind? (eg. Coding, AFK, Busy...)"
+                          maxLength={60}
+                          className="w-full bg-slate-900 border border-slate-800 px-3 py-1.5 pl-8 rounded-xl text-[11px] text-slate-200 focus:outline-none focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500 transition-colors placeholder:text-slate-650"
+                        />
+                        <Smile className="w-3.5 h-3.5 text-slate-500 absolute left-2.5 top-2.5" />
+                      </div>
+                    </div>
                   </div>
 
                   {/* Right Column: Cryptographic passwords edit and actions */}
@@ -644,6 +860,7 @@ export default function ProfileModal({
                           updating ||
                           (newUsername === username &&
                             newAvatar === avatar &&
+                            newStatusMessage === (statusMessage || "") &&
                             !oldPassword &&
                             !newPassword)
                         }
@@ -982,6 +1199,174 @@ export default function ProfileModal({
                     </div>
                   </div>
                 </div>
+              </div>
+            )}
+
+            {/* TAB 5: MESSAGE NOTIFICATIONS & CUSTOM SOUND ALERTS */}
+            {activeTab === "notifications" && (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5 animate-fade-in text-[11px] text-slate-300">
+                
+                {/* Left Column: Notification Toggles & Controls */}
+                <div className="space-y-4">
+                  <div className="p-4 bg-slate-900/40 border border-slate-850 rounded-2xl space-y-4">
+                    <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider block font-mono">General Notification Gateways</span>
+                    
+                    <div className="space-y-4">
+                      {/* Desktop notifications toggle */}
+                      <div className="flex items-center justify-between gap-4">
+                        <div>
+                          <span className="font-bold text-slate-200 block">Desktop Push Alerts</span>
+                          <span className="text-[9px] text-slate-400 block leading-tight">Shows HTML5 desktop popup notifications for incoming messages when backgrounded.</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (notificationsEnabled) {
+                              updateNotifications("notifications_enabled", false);
+                            } else {
+                              const perm = await requestPermissionDirectly();
+                              updateNotifications("notifications_enabled", perm === "granted");
+                            }
+                          }}
+                          className={`w-9 h-5 rounded-full p-0.5 transition-colors cursor-pointer shrink-0 ${notificationsEnabled ? "bg-indigo-500" : "bg-slate-800"}`}
+                        >
+                          <div className={`bg-white w-4 h-4 rounded-full shadow transform transition-transform ${notificationsEnabled ? "translate-x-4" : "translate-x-0"}`} />
+                        </button>
+                      </div>
+
+                      {/* Sound alerts toggle */}
+                      <div className="flex items-center justify-between gap-4">
+                        <div>
+                          <span className="font-bold text-slate-200 block">Audible Sound Alerts</span>
+                          <span className="text-[9px] text-slate-400 block leading-tight">Plays custom synthesizer tone alerts upon receiving incoming room messages.</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => updateNotifications("notifications_sound_enabled", !soundEnabled)}
+                          className={`w-9 h-5 rounded-full p-0.5 transition-colors cursor-pointer shrink-0 ${soundEnabled ? "bg-indigo-500" : "bg-slate-800"}`}
+                        >
+                          <div className={`bg-white w-4 h-4 rounded-full shadow transform transition-transform ${soundEnabled ? "translate-x-4" : "translate-x-0"}`} />
+                        </button>
+                      </div>
+
+                      {/* Mute group notifications toggle */}
+                      <div className="flex items-center justify-between gap-4 border-t border-white/5 pt-3.5">
+                        <div>
+                          <span className="font-bold text-slate-200 block">Mute General Group Chats</span>
+                          <span className="text-[9px] text-slate-400 block leading-tight font-sans">Silence sound and alerts for general group messages unless you are explicitly @mentioned.</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => updateNotifications("notifications_mute_groups", !muteGroupNotifications)}
+                          className={`w-9 h-5 rounded-full p-0.5 transition-colors cursor-pointer shrink-0 ${muteGroupNotifications ? "bg-indigo-500" : "bg-slate-800"}`}
+                        >
+                          <div className={`bg-white w-4 h-4 rounded-full shadow transform transition-transform ${muteGroupNotifications ? "translate-x-4" : "translate-x-0"}`} />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Browser permission details info card */}
+                  <div className="p-4 bg-[#0F172A]/40 border border-slate-850 rounded-2xl space-y-2">
+                    <div className="flex items-center gap-2 text-indigo-400 font-bold text-[10px] uppercase font-mono tracking-wider">
+                      <Monitor className="w-4 h-4" />
+                      Browser Authorization Status
+                    </div>
+                    <div className="flex justify-between items-center bg-black/20 p-2.5 rounded-xl border border-white/5 mt-1.5">
+                      <span className="text-slate-400">Current Permission:</span>
+                      <span className={`px-2 py-0.5 text-[9px] font-bold uppercase tracking-wider rounded-lg font-mono ${
+                        typeof window !== "undefined" && "Notification" in window
+                          ? Notification.permission === "granted"
+                            ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-400"
+                            : Notification.permission === "denied"
+                              ? "bg-rose-500/10 border border-rose-500/20 text-rose-400"
+                              : "bg-yellow-500/10 border border-yellow-500/20 text-yellow-400"
+                          : "bg-slate-800 text-slate-500"
+                      }`}>
+                        {typeof window !== "undefined" && "Notification" in window ? Notification.permission : "Unsupported"}
+                      </span>
+                    </div>
+                    <p className="text-[9px] text-slate-500 leading-normal pt-1">
+                      If notifications are denied, click the lock icon in your browser's address bar to reset permissions.
+                    </p>
+                  </div>
+                </div>
+
+                {/* Right Column: Premium Synthesized Tone Selection */}
+                <div className="space-y-4">
+                  <div className="p-4 bg-slate-900/40 border border-slate-850 rounded-2xl space-y-4 font-sans">
+                    <span className="text-[10px] font-bold text-pink-400 uppercase tracking-wider block font-mono">Synthesizer Tone Customization</span>
+                    
+                    <div className="space-y-3.5 select-none">
+                      <div>
+                        <label className="font-semibold text-slate-300 text-[10px] block mb-1.5 uppercase font-mono tracking-wide">
+                          Alert Sound Tune Preset
+                        </label>
+                        <select
+                          value={soundPreset}
+                          disabled={!soundEnabled}
+                          onChange={(e) => updateNotifications("notifications_sound_preset", e.target.value)}
+                          className="w-full bg-slate-950 border border-slate-850 py-2 px-2.5 rounded-xl text-[10.5px] text-slate-300 outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/10 disabled:opacity-50 transition-all font-sans cursor-pointer"
+                        >
+                          <option value="chime">🔔 Classic Pleasant Chime (Double-note E6-A6)</option>
+                          <option value="bloop">💧 Cybernetic Bloop (Fast Upward Sweep)</option>
+                          <option value="ping">✨ Crystal Ping (Crisp High-Frequency Beep)</option>
+                          <option value="echo">📡 Echo Radar (Decaying Decay Pings)</option>
+                        </select>
+                      </div>
+
+                      {/* Volume Slider */}
+                      <div>
+                        <div className="flex justify-between items-center mb-1.5">
+                          <label className="font-semibold text-slate-300 text-[10px] block uppercase font-mono tracking-wide">
+                            Notification Volume
+                          </label>
+                          <span className="text-[9.5px] text-indigo-400 font-bold font-mono">
+                            {soundEnabled ? `${Math.round(soundVolume * 100)}%` : "MUTED"}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-3">
+                          <VolumeX className="w-4 h-4 text-slate-500" />
+                          <input
+                            type="range"
+                            min="0"
+                            max="1"
+                            step="0.05"
+                            value={soundVolume}
+                            disabled={!soundEnabled}
+                            onChange={(e) => updateNotifications("notifications_sound_volume", parseFloat(e.target.value))}
+                            className="flex-1 accent-indigo-500 h-1 bg-slate-950 rounded-lg appearance-none cursor-pointer disabled:opacity-40"
+                          />
+                          <Volume2 className="w-4 h-4 text-indigo-455" />
+                        </div>
+                      </div>
+
+                      {/* Test Sound Button */}
+                      <div className="pt-2">
+                        <button
+                          type="button"
+                          onClick={() => playTestSound(soundPreset, soundVolume)}
+                          className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2 shadow-md hover:shadow-indigo-500/10 disabled:opacity-50 active:scale-[0.98]"
+                        >
+                          <Volume2 className="w-4 h-4" />
+                          <span>Test Sound Notification</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Aesthetic Background Note helper card */}
+                  <div className="p-4 border border-slate-850 bg-[#0F172A]/40 rounded-2xl flex flex-col justify-center">
+                    <div className="flex items-center gap-2 text-pink-400 font-bold text-[10px] uppercase font-mono tracking-wider mb-1.5">
+                      <HelpCircle className="w-4 h-4" />
+                      Active Background Delivery
+                    </div>
+                    <p className="text-[9.5px] text-slate-450 leading-relaxed font-sans">
+                      Our dynamic background push engine ensures you receive incoming room messages in real-time even when your tab is minimized or the app runs in the background. To guarantee sound delivery, ensure your browser has sound authorization permitted.
+                    </p>
+                  </div>
+                </div>
+
               </div>
             )}
           </div>
