@@ -4,9 +4,11 @@ import {
   Accessibility, Eye, VolumeX, ShieldAlert, Monitor, Check, 
   Terminal, UserCheck, EyeOff, Shield, RefreshCw, Smartphone, 
   HelpCircle, Sparkles, MessageSquare, LayoutGrid, ArrowLeft,
-  Bell, Volume2
+  Bell, Volume2, Cloud, FileSpreadsheet, HardDrive, ExternalLink,
+  Copy, CheckCircle2, FolderOpen, Loader, Upload
 } from "lucide-react";
 import { ThemeId, THEME_PRESETS } from "../utils/theme";
+import { compressAvatarFile, normalizeMediaUrl } from "../utils/imageUtils";
 
 interface ProfileModalProps {
   isOpen: boolean;
@@ -52,7 +54,7 @@ export default function ProfileModal({
   onUpdate,
   onSettingsChange,
 }: ProfileModalProps) {
-  const [activeTab, setActiveTab] = useState<"menu" | "profile" | "theme" | "accessibility" | "privacy" | "notifications">("menu");
+  const [activeTab, setActiveTab] = useState<"menu" | "profile" | "theme" | "accessibility" | "privacy" | "notifications" | "cloud">("menu");
 
   // Account states
   const [newUsername, setNewUsername] = useState(username);
@@ -62,8 +64,31 @@ export default function ProfileModal({
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [updating, setUpdating] = useState(false);
+  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
   const [errorMsg, setErrorMsg] = useState("");
   const [success, setSuccess] = useState(false);
+
+  // Google Apps Script Cloud Sync States
+  const [appsScriptUrlInput, setAppsScriptUrlInput] = useState("");
+  const [cloudStatus, setCloudStatus] = useState<{
+    loading: boolean;
+    connected: boolean;
+    configured: boolean;
+    spreadsheetUrl?: string;
+    spreadsheetId?: string;
+    driveFolderUrl?: string;
+    driveFolderId?: string;
+    message?: string;
+    error?: string;
+  }>({
+    loading: false,
+    connected: false,
+    configured: false
+  });
+  const [isSavingUrl, setIsSavingUrl] = useState(false);
+  const [isSyncingAll, setIsSyncingAll] = useState(false);
+  const [copiedCode, setCopiedCode] = useState(false);
+  const [cloudFeedback, setCloudFeedback] = useState<string | null>(null);
 
   // Accessibility States (Loaded from LocalStorage)
   const [fontSize, setFontSizeState] = useState<"small" | "normal" | "large" | "xlarge">("normal");
@@ -203,6 +228,191 @@ export default function ProfileModal({
     } catch (err) {
       console.warn("Failed to play notification sound:", err);
     }
+  };
+
+  // Load cloud status
+  const fetchCloudStatus = async () => {
+    try {
+      setCloudStatus(prev => ({ ...prev, loading: true }));
+      const res = await fetch("/api/appscript/status");
+      const data = await res.json();
+      setCloudStatus({
+        loading: false,
+        connected: !!data.connected,
+        configured: !!data.configured,
+        spreadsheetUrl: data.spreadsheetUrl,
+        spreadsheetId: data.spreadsheetId,
+        driveFolderUrl: data.driveFolderUrl,
+        driveFolderId: data.driveFolderId,
+        message: data.message,
+        error: data.error
+      });
+      if (data.url && !appsScriptUrlInput) {
+        setAppsScriptUrlInput(data.url);
+      }
+    } catch (err: any) {
+      setCloudStatus({
+        loading: false,
+        connected: false,
+        configured: false,
+        error: err.message || "Failed to reach server."
+      });
+    }
+  };
+
+  const handleSaveAppsScriptUrl = async () => {
+    if (!appsScriptUrlInput.trim()) return;
+    setIsSavingUrl(true);
+    setCloudFeedback(null);
+    try {
+      const res = await fetch("/api/appscript/set-url", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: appsScriptUrlInput.trim() })
+      });
+      const data = await res.json();
+      if (data.success) {
+        setCloudFeedback("Apps Script URL connected successfully!");
+        await fetchCloudStatus();
+      } else {
+        setCloudFeedback("Failed to connect: " + (data.error || "Unknown error"));
+      }
+    } catch (err: any) {
+      setCloudFeedback("Error connecting: " + err.message);
+    } finally {
+      setIsSavingUrl(false);
+    }
+  };
+
+  const handleSyncAllData = async () => {
+    setIsSyncingAll(true);
+    setCloudFeedback(null);
+    try {
+      const res = await fetch("/api/appscript/sync-all", { method: "POST" });
+      const data = await res.json();
+      if (data.success) {
+        setCloudFeedback(`Synced ${data.syncedAccounts} accounts and ${data.syncedRooms} rooms to Sheet!`);
+        await fetchCloudStatus();
+      } else {
+        setCloudFeedback("Sync failed: " + (data.error || "Check your Apps Script URL"));
+      }
+    } catch (err: any) {
+      setCloudFeedback("Sync error: " + err.message);
+    } finally {
+      setIsSyncingAll(false);
+    }
+  };
+
+  const handleCopyCodeGs = () => {
+    const codeGs = `// ==============================================================================
+// SECURE CHAT - FULL GOOGLE APPS SCRIPT DATABASE & DRIVE STORAGE ENGINE
+// ==============================================================================
+// 1. Open Google Sheets (create a new blank spreadsheet or use an existing one)
+// 2. Click Extensions > Apps Script
+// 3. Delete any default code and paste this entire Code.gs file
+// 4. Click 'Deploy' > 'New deployment' > Select type: 'Web app'
+// 5. Set 'Execute as: Me' and 'Who has access: Anyone'
+// 6. Click 'Deploy', authorize permissions, and copy the Web App URL!
+// ==============================================================================
+
+const SPREADSHEET_ID = ""; // Leave blank to auto-use active spreadsheet
+const DRIVE_FOLDER_NAME = "SecureChat_Cloud_Drive";
+
+function getOrInitSheet(ss, sheetName, headers) {
+  let sheet = ss.getSheetByName(sheetName);
+  if (!sheet) {
+    sheet = ss.insertSheet(sheetName);
+    if (headers && headers.length > 0) {
+      sheet.appendRow(headers);
+      sheet.getRange(1, 1, 1, headers.length).setFontWeight("bold").setBackground("#0F172A").setFontColor("#FFFFFF");
+      sheet.setFrozenRows(1);
+    }
+  }
+  return sheet;
+}
+
+function initSpreadsheetTabs() {
+  const ss = SPREADSHEET_ID ? SpreadsheetApp.openById(SPREADSHEET_ID) : SpreadsheetApp.getActiveSpreadsheet();
+  getOrInitSheet(ss, "Accounts", ["Email", "Username", "Avatar", "StatusMessage", "RegisteredAt", "LastSeen", "DataJSON"]);
+  getOrInitSheet(ss, "Media_Drive", ["FileID", "FileName", "MimeType", "DriveLink", "Sender", "RoomID", "Timestamp"]);
+  getOrInitSheet(ss, "Messages", ["MessageID", "RoomID", "Sender", "Timestamp", "Ciphertext", "IsMedia", "DriveLink", "RawJSON"]);
+  getOrInitSheet(ss, "Rooms", ["RoomID", "RoomName", "Description", "CreatedBy", "CreatedAt", "MemberCount", "DataJSON"]);
+  getOrInitSheet(ss, "Friends", ["UserEmail", "FriendUsername", "Status", "Timestamp"]);
+  return ss;
+}
+
+function getOrCreateDriveFolder() {
+  const folders = DriveApp.getFoldersByName(DRIVE_FOLDER_NAME);
+  if (folders.hasNext()) return folders.next();
+  const folder = DriveApp.createFolder(DRIVE_FOLDER_NAME);
+  folder.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+  return folder;
+}
+
+function doPost(e) {
+  try {
+    const payload = JSON.parse(e.postData.contents);
+    const action = payload.action;
+    const ss = initSpreadsheetTabs();
+    const folder = getOrCreateDriveFolder();
+
+    if (action === "upload_media") {
+      const base64Data = payload.base64.split(",")[1] || payload.base64;
+      const decodedBytes = Utilities.base64Decode(base64Data);
+      const blob = Utilities.newBlob(decodedBytes, payload.mimeType || "image/png", payload.fileName || "upload.png");
+      const file = folder.createFile(blob);
+      file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+      const fileUrl = file.getUrl();
+      const directUrl = "https://lh3.googleusercontent.com/d/" + file.getId();
+
+      const mediaSheet = ss.getSheetByName("Media_Drive");
+      mediaSheet.appendRow([file.getId(), payload.fileName, payload.mimeType, directUrl, payload.sender || "anonymous", payload.roomId || "general", new Date().toISOString()]);
+
+      return ContentService.createTextOutput(JSON.stringify({ success: true, fileId: file.getId(), fileUrl: directUrl, driveUrl: fileUrl, fileName: payload.fileName })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    if (action === "register_user") {
+      const accountsSheet = ss.getSheetByName("Accounts");
+      const data = accountsSheet.getDataRange().getValues();
+      let rowIndex = -1;
+      for (let i = 1; i < data.length; i++) {
+        if (String(data[i][0]).toLowerCase() === String(payload.email).toLowerCase()) { rowIndex = i + 1; break; }
+      }
+      const row = [payload.email, payload.username, payload.avatar || "🦊", payload.statusMessage || "", payload.registeredAt || new Date().toISOString(), new Date().toISOString(), JSON.stringify(payload)];
+      if (rowIndex > 0) accountsSheet.getRange(rowIndex, 1, 1, row.length).setValues([row]);
+      else accountsSheet.appendRow(row);
+      return ContentService.createTextOutput(JSON.stringify({ success: true, action: "user_registered" })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    if (action === "save_message") {
+      const msgSheet = ss.getSheetByName("Messages");
+      const msg = payload.message || {};
+      msgSheet.appendRow([msg.id || "msg-" + Date.now(), payload.roomId || "general", msg.sender || "anonymous", new Date(msg.timestamp || Date.now()).toISOString(), String(msg.ciphertext || "").slice(0, 500), msg.isMedia || false, msg.decryptedMediaUrl || "", JSON.stringify(msg)]);
+      return ContentService.createTextOutput(JSON.stringify({ success: true, action: "message_saved" })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    return ContentService.createTextOutput(JSON.stringify({ success: true, message: "Action processed" })).setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ success: false, error: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+  }
+}
+
+function doGet(e) {
+  const ss = initSpreadsheetTabs();
+  const folder = getOrCreateDriveFolder();
+  return ContentService.createTextOutput(JSON.stringify({
+    status: "ok",
+    appName: "SecureChat Apps Script Engine",
+    spreadsheetId: ss.getId(),
+    spreadsheetUrl: ss.getUrl(),
+    driveFolderId: folder.getId(),
+    driveFolderUrl: folder.getUrl()
+  })).setMimeType(ContentService.MimeType.JSON);
+}`;
+
+    navigator.clipboard.writeText(codeGs);
+    setCopiedCode(true);
+    setTimeout(() => setCopiedCode(false), 3000);
   };
 
   // Diagnostic states
@@ -460,6 +670,19 @@ export default function ProfileModal({
             Notification Alerts
           </button>
 
+          <button
+            type="button"
+            onClick={() => { setActiveTab("cloud"); fetchCloudStatus(); }}
+            className={`flex items-center gap-2.5 px-4 py-3 text-xs font-bold rounded-2xl transition-all cursor-pointer truncate w-full ${
+              activeTab === "cloud"
+                ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/30 font-extrabold shadow-sm"
+                : "text-slate-400 hover:bg-white/5 hover:text-slate-200"
+            }`}
+          >
+            <FileSpreadsheet className="w-4 h-4 text-emerald-400" />
+            Sheets & Drive Cloud
+          </button>
+
           <div className="mt-auto text-[10px] text-slate-500 px-3 py-2 border-t border-white/5 pt-3">
             <p>Active Node: <span className="text-emerald-400 font-mono font-bold">Secure</span></p>
             <p className="mt-1 font-mono text-[9px]">Last Sync: {currentTime}</p>
@@ -491,6 +714,7 @@ export default function ProfileModal({
                 {activeTab === "accessibility" && "♿ Inclusivity, Layout parameters, & Assistive Tech"}
                 {activeTab === "privacy" && "🔒 Enterprise Privacy controls & active sessions info"}
                 {activeTab === "notifications" && "🔔 Message Notifications & Custom Sound Alerts"}
+                {activeTab === "cloud" && "📊 Google Sheets Database & Google Drive Cloud"}
               </h4>
             </div>
             <button
@@ -631,6 +855,29 @@ export default function ProfileModal({
                     </div>
                     <span className="text-[9.5px] font-bold text-slate-500 group-hover:text-pink-455 transition-colors font-mono self-end">Configure Options &rarr;</span>
                   </button>
+
+                  {/* Card 6: Sheets & Drive Cloud */}
+                  <button
+                    type="button"
+                    onClick={() => { setActiveTab("cloud"); fetchCloudStatus(); }}
+                    className="p-5 rounded-2xl bg-slate-900/40 border border-slate-800 hover:border-emerald-500/60 hover:bg-slate-900/70 text-left transition-all cursor-pointer group flex flex-col justify-between h-40 scale-100 active:scale-[0.98] duration-150"
+                  >
+                    <div>
+                      <div className="flex items-center gap-2 mb-2.5">
+                        <div className="p-2 bg-emerald-500/10 text-emerald-400 rounded-xl group-hover:bg-emerald-600 group-hover:text-white transition-colors shrink-0">
+                          <FileSpreadsheet className="w-4 h-4" />
+                        </div>
+                        <span className="text-[10px] font-extrabold uppercase font-mono tracking-wider text-emerald-450">Cloud Sync & Storage</span>
+                      </div>
+                      <h4 className="text-xs font-bold text-slate-100 group-hover:text-emerald-400 transition-colors mb-1 font-display">
+                        Google Sheets & Drive
+                      </h4>
+                      <p className="text-[10.5px] text-slate-400 leading-normal line-clamp-2">
+                        Real-time automatic sync of accounts, rooms & chats to Google Sheets with photo storage in Drive.
+                      </p>
+                    </div>
+                    <span className="text-[9.5px] font-bold text-slate-500 group-hover:text-emerald-455 transition-colors font-mono self-end">Configure Cloud &rarr;</span>
+                  </button>
                 </div>
               </div>
             )}
@@ -689,7 +936,7 @@ export default function ProfileModal({
                       <div className="relative group shrink-0">
                         {newAvatar && (newAvatar.startsWith("data:image") || newAvatar.startsWith("http")) ? (
                           <img
-                            src={newAvatar}
+                            src={normalizeMediaUrl(newAvatar)}
                             alt="Profile Preview"
                             className="w-11 h-11 rounded-full object-cover border-2 border-indigo-500 shadow-md"
                             referrerPolicy="no-referrer"
@@ -699,6 +946,11 @@ export default function ProfileModal({
                             {newAvatar || "🦊"}
                           </div>
                         )}
+                        {isUploadingPhoto && (
+                          <div className="absolute inset-0 bg-black/60 rounded-full flex items-center justify-center">
+                            <Loader className="w-4 h-4 text-indigo-400 animate-spin" />
+                          </div>
+                        )}
                       </div>
 
                       <div className="flex-1 space-y-1">
@@ -706,23 +958,33 @@ export default function ProfileModal({
                           Custom Photo Profile
                         </label>
                         <div className="flex items-center gap-2">
-                          <label className="flex items-center gap-1 px-2.5 py-1 bg-indigo-600/90 hover:bg-indigo-600 text-white text-[9px] font-bold rounded-lg cursor-pointer transition-all shadow-sm">
-                            <Smile className="w-3 h-3" />
-                            <span>Upload</span>
+                          <label className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-[10px] font-bold rounded-lg cursor-pointer transition-all shadow-sm active:scale-95">
+                            {isUploadingPhoto ? (
+                              <Loader className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Upload className="w-3 h-3" />
+                            )}
+                            <span>{isUploadingPhoto ? "Processing..." : "Upload Photo"}</span>
                             <input
                               type="file"
                               accept="image/*"
                               className="hidden"
-                              onChange={(e) => {
+                              disabled={isUploadingPhoto}
+                              onChange={async (e) => {
                                 const file = e.target.files?.[0];
-                                if (file) {
-                                  const reader = new FileReader();
-                                  reader.onload = (event) => {
-                                    if (event.target?.result) {
-                                      setNewAvatar(event.target.result as string);
-                                    }
-                                  };
-                                  reader.readAsDataURL(file);
+                                if (!file) return;
+                                setIsUploadingPhoto(true);
+                                setErrorMsg("");
+                                try {
+                                  const compressedDataUrl = await compressAvatarFile(file);
+                                  setNewAvatar(compressedDataUrl);
+                                } catch (err: any) {
+                                  console.error("Avatar compression error:", err);
+                                  setErrorMsg("Failed to process photo: " + (err.message || "Unknown error"));
+                                } finally {
+                                  setIsUploadingPhoto(false);
+                                  // Reset input value so same file can be re-selected if needed
+                                  e.target.value = "";
                                 }
                               }}
                             />
@@ -731,7 +993,7 @@ export default function ProfileModal({
                             <button
                               type="button"
                               onClick={() => setNewAvatar("🦊")}
-                              className="px-2 py-1 bg-slate-800 hover:bg-slate-750 text-slate-400 text-[9px] font-semibold rounded-lg border border-slate-755 transition-colors cursor-pointer"
+                              className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-750 text-slate-400 hover:text-slate-200 text-[10px] font-semibold rounded-lg border border-slate-700 transition-colors cursor-pointer"
                             >
                               Reset
                             </button>
@@ -1366,12 +1628,231 @@ export default function ProfileModal({
                     </p>
                   </div>
                 </div>
-
               </div>
             )}
+
+            {/* TAB: GOOGLE SHEETS & DRIVE CLOUD STORAGE */}
+            {activeTab === "cloud" && (
+                <div className="space-y-6">
+                  {/* Status Banner */}
+                  <div className={`p-4.5 rounded-2xl border flex flex-col sm:flex-row sm:items-center justify-between gap-4 ${
+                    cloudStatus.connected 
+                      ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-300"
+                      : cloudStatus.configured
+                      ? "bg-amber-500/10 border-amber-500/30 text-amber-300"
+                      : "bg-indigo-500/10 border-indigo-500/30 text-indigo-300"
+                  }`}>
+                    <div className="flex items-start gap-3">
+                      <div className={`p-2.5 rounded-xl shrink-0 ${
+                        cloudStatus.connected
+                          ? "bg-emerald-500/20 text-emerald-400"
+                          : cloudStatus.configured
+                          ? "bg-amber-500/20 text-amber-400"
+                          : "bg-indigo-500/20 text-indigo-400"
+                      }`}>
+                        <FileSpreadsheet className="w-5 h-5" />
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <h4 className="text-xs font-bold font-mono uppercase tracking-wider">
+                            {cloudStatus.connected
+                              ? "✓ Cloud Database & Drive Connected"
+                              : cloudStatus.configured
+                              ? "⚠️ Apps Script Configured (Testing Connectivity...)"
+                              : "🚀 Google Sheets & Drive Auto-Sync"}
+                          </h4>
+                          <span className={`px-2 py-0.5 rounded-full text-[9px] font-bold uppercase font-mono ${
+                            cloudStatus.connected
+                              ? "bg-emerald-500/20 text-emerald-300 border border-emerald-500/40"
+                              : "bg-slate-800 text-slate-400 border border-slate-700"
+                          }`}>
+                            {cloudStatus.connected ? "Real-time Live" : "Setup Required"}
+                          </span>
+                        </div>
+                        <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                          {cloudStatus.connected
+                            ? "All user accounts, chat rooms, and messages are continuously backed up to your Google Sheet. Uploaded photos & voice memos are hosted in Google Drive."
+                            : "Connect your Google Apps Script Web App to automatically store user accounts and messages in Google Sheets, and host photos directly in Google Drive."}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={fetchCloudStatus}
+                        disabled={cloudStatus.loading}
+                        className="px-3 py-2 bg-slate-800/80 hover:bg-slate-700 text-slate-200 text-xs font-bold rounded-xl transition-all cursor-pointer flex items-center gap-1.5 border border-slate-700 shadow-sm disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${cloudStatus.loading ? "animate-spin" : ""}`} />
+                        <span>Refresh Status</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  {cloudFeedback && (
+                    <div className={`p-3 rounded-xl text-xs font-medium border flex items-center gap-2 ${
+                      cloudFeedback.includes("successfully") || cloudFeedback.includes("Synced")
+                        ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400"
+                        : "bg-red-500/10 border-red-500/20 text-red-400"
+                    }`}>
+                      <CheckCircle2 className="w-4 h-4 shrink-0" />
+                      <span>{cloudFeedback}</span>
+                    </div>
+                  )}
+
+                  {/* Apps Script Web App URL Input */}
+                  <div className="p-5 bg-[#0F172A]/50 border border-slate-800 rounded-2xl space-y-4">
+                    <div>
+                      <label className="text-xs font-bold text-slate-200 block uppercase font-mono tracking-wider mb-1">
+                        Google Apps Script Web App URL
+                      </label>
+                      <p className="text-[11px] text-slate-400 mb-3 leading-relaxed">
+                        Paste your deployed Google Apps Script Web App URL (ending with <code className="text-indigo-400 font-mono">/exec</code>).
+                      </p>
+                      
+                      <div className="flex flex-col sm:flex-row items-stretch gap-2">
+                        <input
+                          type="url"
+                          value={appsScriptUrlInput}
+                          onChange={(e) => setAppsScriptUrlInput(e.target.value)}
+                          placeholder="https://script.google.com/macros/s/.../exec"
+                          className="flex-1 bg-slate-950 border border-slate-800 px-3.5 py-2.5 rounded-xl text-xs font-mono text-slate-200 placeholder:text-slate-600 outline-none focus:border-indigo-500/60 focus:ring-1 focus:ring-indigo-500/20 transition-all"
+                        />
+                        <button
+                          type="button"
+                          onClick={handleSaveAppsScriptUrl}
+                          disabled={isSavingUrl || !appsScriptUrlInput.trim()}
+                          className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-2 shadow-md hover:shadow-indigo-500/20 shrink-0 font-mono active:scale-[0.98]"
+                        >
+                          {isSavingUrl ? (
+                            <>
+                              <RefreshCw className="w-4 h-4 animate-spin" />
+                              <span>Saving...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Check className="w-4 h-4" />
+                              <span>Connect & Save</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Quick Action Links if connected */}
+                    {cloudStatus.spreadsheetUrl && (
+                      <div className="pt-2 border-t border-slate-800/80 grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                        <a
+                          href={cloudStatus.spreadsheetUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="p-3 bg-slate-900/60 hover:bg-slate-900 border border-slate-800 hover:border-emerald-500/40 rounded-xl flex items-center justify-between text-slate-300 hover:text-emerald-400 text-xs font-bold transition-all group"
+                        >
+                          <div className="flex items-center gap-2 truncate">
+                            <FileSpreadsheet className="w-4 h-4 text-emerald-400 shrink-0" />
+                            <span className="truncate">Open Google Sheet</span>
+                          </div>
+                          <ExternalLink className="w-3.5 h-3.5 opacity-60 group-hover:opacity-100 shrink-0" />
+                        </a>
+
+                        {cloudStatus.driveFolderUrl && (
+                          <a
+                            href={cloudStatus.driveFolderUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="p-3 bg-slate-900/60 hover:bg-slate-900 border border-slate-800 hover:border-indigo-500/40 rounded-xl flex items-center justify-between text-slate-300 hover:text-indigo-400 text-xs font-bold transition-all group"
+                          >
+                            <div className="flex items-center gap-2 truncate">
+                              <FolderOpen className="w-4 h-4 text-indigo-400 shrink-0" />
+                              <span className="truncate">Open Drive Photos</span>
+                            </div>
+                            <ExternalLink className="w-3.5 h-3.5 opacity-60 group-hover:opacity-100 shrink-0" />
+                          </a>
+                        )}
+
+                        <button
+                          type="button"
+                          onClick={handleSyncAllData}
+                          disabled={isSyncingAll}
+                          className="p-3 bg-slate-900/60 hover:bg-slate-900 border border-slate-800 hover:border-purple-500/40 rounded-xl flex items-center justify-between text-slate-300 hover:text-purple-400 text-xs font-bold transition-all disabled:opacity-50 cursor-pointer"
+                        >
+                          <div className="flex items-center gap-2 truncate">
+                            <RefreshCw className={`w-4 h-4 text-purple-400 shrink-0 ${isSyncingAll ? "animate-spin" : ""}`} />
+                            <span className="truncate">{isSyncingAll ? "Syncing..." : "Sync All Now"}</span>
+                          </div>
+                          <Cloud className="w-3.5 h-3.5 opacity-60 shrink-0" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Setup Guide & Copy Code.gs */}
+                  <div className="p-5 bg-[#0F172A]/50 border border-slate-800 rounded-2xl space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className="p-1.5 bg-indigo-500/10 text-indigo-400 rounded-lg">
+                          <HardDrive className="w-4 h-4" />
+                        </div>
+                        <h4 className="text-xs font-bold text-slate-200 uppercase font-mono tracking-wider">
+                          How to Set Up (One-Time Setup in 60 seconds)
+                        </h4>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={handleCopyCodeGs}
+                        className={`px-3 py-1.5 text-xs font-bold rounded-xl transition-all cursor-pointer flex items-center gap-1.5 font-mono shadow-sm ${
+                          copiedCode
+                            ? "bg-emerald-600 text-white"
+                            : "bg-indigo-600 hover:bg-indigo-500 text-white"
+                        }`}
+                      >
+                        {copiedCode ? (
+                          <>
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            <span>Copied Code.gs!</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>Copy Full Code.gs</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    <ol className="text-xs text-slate-400 space-y-2.5 list-decimal list-inside leading-relaxed">
+                      <li>
+                        Open <a href="https://sheets.new" target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline font-semibold">sheets.new</a> in your browser to create a new blank Google Spreadsheet.
+                      </li>
+                      <li>
+                        Click on <span className="text-slate-200 font-semibold">Extensions &rarr; Apps Script</span> in the top menu.
+                      </li>
+                      <li>
+                        Delete any existing sample code in <code className="text-indigo-400 font-mono">Code.gs</code>, click the button above to copy the script, and paste it.
+                      </li>
+                      <li>
+                        Click the blue <span className="text-slate-200 font-semibold">Deploy &rarr; New deployment</span> button (top-right).
+                      </li>
+                      <li>
+                        Select type <span className="text-slate-200 font-semibold">Web app</span>, set <span className="text-slate-200 font-semibold">Execute as: Me</span>, and set <span className="text-slate-200 font-semibold">Who has access: Anyone</span>.
+                      </li>
+                      <li>
+                        Click <span className="text-slate-200 font-semibold">Deploy</span>, authorize permissions with your Google account, copy the Web App URL, and paste it into the field above!
+                      </li>
+                    </ol>
+
+                    <div className="p-3 bg-slate-950/80 border border-slate-850 rounded-xl text-[11px] text-slate-400 flex items-center gap-2">
+                      <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
+                      <span>The Apps Script will automatically create all tabs (<b className="text-slate-300">Accounts</b>, <b className="text-slate-300">Media_Drive</b>, <b className="text-slate-300">Messages</b>, <b className="text-slate-300">Rooms</b>) and create the <b className="text-slate-300">SecureChat_Cloud_Drive</b> folder in your Google Drive automatically!</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </div>
-    </div>
   );
 }

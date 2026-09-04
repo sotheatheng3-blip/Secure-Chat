@@ -9,6 +9,9 @@ import ProfileModal from "./components/ProfileModal";
 import FriendsModal from "./components/FriendsModal";
 import { auth, googleProvider } from "./utils/firebase";
 import { signInWithPopup, signInWithEmailAndPassword, createUserWithEmailAndPassword } from "firebase/auth";
+import { apiRequest } from "./utils/api";
+import { uploadMediaToGoogleDrive } from "./utils/appScript";
+import { compressImageFile, compressAvatarFile, normalizeMediaUrl } from "./utils/imageUtils";
 
 export default function App() {
   // Identity States
@@ -86,6 +89,41 @@ export default function App() {
   useEffect(() => {
     activeCallRef.current = activeCall;
   }, [activeCall]);
+
+  // Blocked Users State
+  const [blockedUsers, setBlockedUsers] = useState<string[]>(() => {
+    try {
+      const stored = localStorage.getItem("secure_chat_blocked_users");
+      return stored ? JSON.parse(stored) : [];
+    } catch (e) {
+      return [];
+    }
+  });
+  const blockedUsersRef = useRef<string[]>(blockedUsers);
+  useEffect(() => {
+    blockedUsersRef.current = blockedUsers;
+  }, [blockedUsers]);
+
+  const handleBlockedUsersChange = useCallback((updated: string[]) => {
+    setBlockedUsers(updated);
+    try {
+      localStorage.setItem("secure_chat_blocked_users", JSON.stringify(updated));
+    } catch (e) {}
+  }, []);
+
+  // Fetch blocked list when username changes
+  useEffect(() => {
+    if (username) {
+      apiRequest(`/api/friends/blocked-list?username=${encodeURIComponent(username)}`).then(res => {
+        if (res.ok && res.data?.success && Array.isArray(res.data.blockedUsers)) {
+          setBlockedUsers(res.data.blockedUsers);
+          try {
+            localStorage.setItem("secure_chat_blocked_users", JSON.stringify(res.data.blockedUsers));
+          } catch (e) {}
+        }
+      });
+    }
+  }, [username]);
 
   // Load call history when user changes
   useEffect(() => {
@@ -953,6 +991,11 @@ export default function App() {
 
             // BROWSER PUSH NOTIFICATION SYSTEM
             if (message.sender !== userHandle) {
+              const isSenderBlocked = blockedUsersRef.current.some(b => b.toLowerCase() === (message.sender || "").toLowerCase());
+              if (isSenderBlocked) {
+                break;
+              }
+
               const isRoomNotActive = roomId !== activeRoomId;
               const isDocHidden = typeof document !== "undefined" && document.visibilityState === "hidden";
               
@@ -1166,7 +1209,8 @@ export default function App() {
 
           case "call:incoming": {
             const { roomId, callType, caller, participants } = payload;
-            if (caller !== userHandle) {
+            const isBlocked = blockedUsersRef.current.some(b => b.toLowerCase() === (caller || "").toLowerCase());
+            if (caller !== userHandle && !isBlocked) {
               setIncomingCall({ roomId, callType, caller, status: "ringing", participants });
               logSecurity(`Incoming ${callType} call from @${caller} in room #${roomId}`);
               
@@ -1865,60 +1909,121 @@ export default function App() {
     }
   }, [activeRoomId, username]);
 
-  // Upload file or media as Data URL
+  // Upload file or media (saved to Google Drive & recorded in Google Sheet)
   const handleSendFile = async (file: File) => {
     logSecurity(`Uploading file ${file.name} (${(file.size / 1024).toFixed(1)} KB)...`);
 
     try {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = reader.result as string;
-        const messageObj: Message = {
-          id: `msg-${Date.now()}`,
-          sender: username,
-          timestamp: Date.now(),
-          ciphertext: dataUrl,
-          iv: "unencrypted",
-          isMedia: true,
-          mediaType: file.type,
-          fileName: file.name,
-          fileSize: file.size
-        };
+      let fileDataUrl: string;
+      const isImage = file.type.startsWith("image/");
 
-        if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-          wsRef.current.send(JSON.stringify({
-            type: "message:send",
-            roomId: activeRoomId,
-            message: messageObj
-          }));
-          logSecurity(`Dispatched file ${file.name} completely!`);
+      if (isImage) {
+        try {
+          const compressed = await compressImageFile(file, 1600, 1600, 0.88);
+          fileDataUrl = compressed.dataUrl;
+        } catch (compErr) {
+          console.warn("Image optimization fallback:", compErr);
+          fileDataUrl = await new Promise<string>((resolve, reject) => {
+            const r = new FileReader();
+            r.onload = () => resolve(r.result as string);
+            r.onerror = () => reject(new Error("Failed reading file"));
+            r.readAsDataURL(file);
+          });
         }
+      } else {
+        fileDataUrl = await new Promise<string>((resolve, reject) => {
+          const r = new FileReader();
+          r.onload = () => resolve(r.result as string);
+          r.onerror = () => reject(new Error("Failed reading file"));
+          r.readAsDataURL(file);
+        });
+      }
+
+      // Upload to Google Drive via server proxy
+      let finalMediaUrl = fileDataUrl;
+      try {
+        const driveResult = await uploadMediaToGoogleDrive(
+          fileDataUrl,
+          file.name,
+          file.type,
+          username,
+          activeRoomId
+        );
+        if (driveResult && driveResult.success && driveResult.fileUrl) {
+          finalMediaUrl = normalizeMediaUrl(driveResult.fileUrl);
+          logSecurity(`Cloud Drive upload verified: ${file.name} stored safely in Drive & Sheet!`);
+        }
+      } catch (driveErr) {
+        console.warn("Drive sync note:", driveErr);
+      }
+
+      const messageObj: Message = {
+        id: `msg-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        sender: username,
+        timestamp: Date.now(),
+        ciphertext: finalMediaUrl,
+        iv: "unencrypted",
+        isMedia: true,
+        mediaType: file.type,
+        fileName: file.name,
+        fileSize: file.size,
+        decryptedMediaUrl: finalMediaUrl
       };
-      reader.readAsDataURL(file);
+
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: "message:send",
+          roomId: activeRoomId,
+          message: messageObj
+        }));
+        logSecurity(`Dispatched file ${file.name} completely!`);
+      }
     } catch (err) {
       console.error(err);
       logSecurity(`File upload failed: ${err}`);
+      throw err;
     }
   };
 
-  // Upload recorded voice note as Data URL
+  // Upload recorded voice note (saved to Google Drive & recorded in Google Sheet)
   const handleSendVoice = async (audioBlob: Blob) => {
-    logSecurity("Uploading voice memo recording...");
+    logSecurity("Uploading voice memo recording to Cloud Drive...");
 
     try {
       const reader = new FileReader();
-      reader.onload = () => {
-        const dataUrl = reader.result as string;
+      reader.onload = async () => {
+        const rawDataUrl = reader.result as string;
+        const fileName = `voice_${Date.now()}.webm`;
+
+        // Upload to Google Drive
+        let finalMediaUrl = rawDataUrl;
+        try {
+          const driveResult = await uploadMediaToGoogleDrive(
+            rawDataUrl,
+            fileName,
+            "audio/webm",
+            username,
+            activeRoomId
+          );
+          if (driveResult && driveResult.success && driveResult.fileUrl) {
+            finalMediaUrl = driveResult.fileUrl;
+            logSecurity("Voice memo backed up directly to Google Drive & recorded in Sheet!");
+          }
+        } catch (driveErr) {
+          console.warn("Drive voice sync note:", driveErr);
+        }
+
         const messageObj: Message = {
           id: `msg-${Date.now()}`,
           sender: username,
           timestamp: Date.now(),
-          ciphertext: dataUrl,
+          ciphertext: finalMediaUrl,
           iv: "unencrypted",
           isAudio: true,
           mediaType: "audio/webm",
-          fileName: "voice_note.webm",
-          fileSize: audioBlob.size
+          fileName: fileName,
+          fileSize: audioBlob.size,
+          decryptedMediaUrl: finalMediaUrl
         };
 
         if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
@@ -2241,6 +2346,7 @@ export default function App() {
                   type="button"
                   onClick={() => {
                     setActiveRoomId(activeMentionBanner.roomId);
+                    setMobileView("chat");
                     setActiveMentionBanner(null);
                   }}
                   className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-slate-950 font-black text-[9px] rounded-lg tracking-wider uppercase transition-all cursor-pointer shadow-sm active:scale-95"
@@ -2288,6 +2394,7 @@ export default function App() {
             }
           }}
           typingUsersRecord={typingUsersRecord}
+          blockedUsers={blockedUsers}
         />
       </div>
 
@@ -2315,6 +2422,7 @@ export default function App() {
           onUpdateRoomPrivacy={handleUpdateRoomPrivacy}
           rooms={rooms}
           onForwardMessage={handleForwardMessage}
+          blockedUsers={blockedUsers}
         />
       </div>
 
@@ -2350,6 +2458,8 @@ export default function App() {
         onRefreshRooms={() => {
           fetchPendingRequestsCount(username);
         }}
+        blockedUsers={blockedUsers}
+        onBlockedUsersChange={handleBlockedUsersChange}
       />
 
       {/* Incoming Call Dialog Overlay */}

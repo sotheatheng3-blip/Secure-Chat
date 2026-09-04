@@ -25,6 +25,7 @@ interface SidebarProps {
   activeTab?: "chats" | "calls";
   onTabChange?: (tab: "chats" | "calls") => void;
   typingUsersRecord?: Record<string, string[]>;
+  blockedUsers?: string[];
 }
 
 const formatCallTimestamp = (timestamp: number) => {
@@ -76,6 +77,7 @@ export default function Sidebar({
   activeTab: controlledActiveTab,
   onTabChange,
   typingUsersRecord = {},
+  blockedUsers = [],
 }: SidebarProps) {
   const [searchQuery, setSearchQuery] = useState("");
   const [localActiveTab, setLocalActiveTab] = useState<"chats" | "calls">("chats");
@@ -92,7 +94,12 @@ export default function Sidebar({
 
   // Split groups vs DMs
   const groupChannels = rooms.filter((r) => r.isGroup);
-  const directMessages = rooms.filter((r) => !r.isGroup);
+  const directMessages = rooms.filter((r) => {
+    if (r.isGroup) return false;
+    const counterpart = r.name.replace(currentUsername, "").replace("&", "").trim();
+    if (blockedUsers.some((b) => b.toLowerCase() === counterpart.toLowerCase())) return false;
+    return true;
+  });
 
   const filteredGroupChannels = groupChannels.filter((room) =>
     room.name.toLowerCase().includes(searchQuery.toLowerCase())

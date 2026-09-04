@@ -1,6 +1,7 @@
 import express from "express";
 import http from "http";
 import path from "path";
+import fs from "fs";
 import { fileURLToPath } from "url";
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer as createViteServer } from "vite";
@@ -28,15 +29,53 @@ const getDirnameAndFilename = () => {
 
 const { __filename, __dirname } = getDirnameAndFilename();
 
+// File persistence helper for production and hosting
+const DATA_DIR = path.join(process.cwd(), "data");
+const STORAGE_FILE = path.join(DATA_DIR, "app_storage.json");
+
+function loadStoredState() {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    if (fs.existsSync(STORAGE_FILE)) {
+      const raw = fs.readFileSync(STORAGE_FILE, "utf-8");
+      return JSON.parse(raw);
+    }
+  } catch (e) {
+    console.warn("Could not read stored server state from disk:", e);
+  }
+  return null;
+}
+
+let saveTimer: NodeJS.Timeout | null = null;
+function persistServerState(state: any) {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try {
+      if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      }
+      fs.writeFileSync(STORAGE_FILE, JSON.stringify(state, null, 2), "utf-8");
+    } catch (err) {
+      console.warn("Failed to persist server state to disk:", err);
+    }
+  }, 1000);
+}
+
 async function startServer() {
   const app = express();
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server });
 
-  const PORT = 3000;
+  // Dynamic PORT configuration for cloud hosting (Cloud Run, Railway, Render, etc.)
+  const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
-  // In-memory application state
-  const rooms: Record<string, any> = {
+  // Load existing persistent state or initialize fresh
+  const savedState = loadStoredState();
+
+  // In-memory + persistent application state
+  const rooms: Record<string, any> = savedState?.rooms || {
     "general": {
       id: "general",
       name: "Global Plaza",
@@ -57,10 +96,73 @@ async function startServer() {
     }
   };
 
-  const messages: Record<string, any[]> = {
+  const messages: Record<string, any[]> = savedState?.messages || {
     "general": [],
     "tech": []
   };
+
+  // Persistent user accounts
+  const userAccounts: Record<string, {
+    email: string;
+    username: string;
+    passwordHash: string;
+    salt: string;
+    avatar: string;
+    rsaPublicKeyJwk: string;
+    rsaPrivateKeyJwk: string;
+    statusMessage?: string;
+  }> = savedState?.userAccounts || {};
+
+  // In-memory friendship system
+  const friendshipList: Record<string, string[]> = savedState?.friendshipList || {};
+  
+  // Pending friend requests
+  interface FriendRequest {
+    id: string;
+    sender: string;
+    receiver: string;
+    timestamp: number;
+    status: "pending" | "accepted" | "declined";
+  }
+  const friendRequests: FriendRequest[] = savedState?.friendRequests || [];
+
+  // Blocked users map: username (lowercase) -> array of blocked usernames
+  const blockedUsersMap: Record<string, string[]> = savedState?.blockedUsersMap || {};
+
+  // Google Apps Script Web App URL for Sheet & Drive sync
+  let dynamicAppsScriptUrl: string = process.env.APPS_SCRIPT_URL || savedState?.appsScriptUrl || "https://script.google.com/macros/s/AKfycbw39zju3bUl9NCher1yojf6jzXB_I0W4s0FFdxc5t2c5V-6fs0jm4QpPVAShw9_CJdDFw/exec";
+
+  async function syncToGoogleAppsScript(action: string, payload: any) {
+    if (!dynamicAppsScriptUrl) return null;
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      const res = await fetch(dynamicAppsScriptUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, ...payload }),
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+      const result = await res.json().catch(() => null);
+      return result;
+    } catch (e: any) {
+      console.warn(`[AppsScript Sync Note] ${action}:`, e.message || e);
+      return null;
+    }
+  }
+
+  function triggerSave() {
+    persistServerState({
+      rooms,
+      messages,
+      userAccounts,
+      friendshipList,
+      friendRequests,
+      blockedUsersMap,
+      appsScriptUrl: dynamicAppsScriptUrl
+    });
+  }
 
   const activeCalls: Record<string, any> = {};
 
@@ -164,6 +266,10 @@ async function startServer() {
               privacy: privacy || "public"
             };
             messages[id] = [];
+            triggerSave();
+
+            // Background sync to Google Apps Script / Sheet
+            syncToGoogleAppsScript("save_room", { room: rooms[id] });
 
             broadcast({
               type: "room:created",
@@ -178,6 +284,7 @@ async function startServer() {
             if (!room) return;
 
             room.privacy = privacy;
+            triggerSave();
 
             // Broadcast privacy change back to all clients
             broadcast({
@@ -196,6 +303,7 @@ async function startServer() {
 
             if (!room.members.includes(username)) {
               room.members.push(username);
+              triggerSave();
             }
 
             // Sync room state and decrypted history back to the joining browser
@@ -226,6 +334,7 @@ async function startServer() {
               ...room.encryptedKeys,
               ...encryptedKeys
             };
+            triggerSave();
 
             broadcastToRoom(roomId, {
               type: "room:keys_updated",
@@ -243,6 +352,10 @@ async function startServer() {
               messages[roomId] = [];
             }
             messages[roomId].push(message);
+            triggerSave();
+
+            // Background sync to Google Apps Script / Sheet
+            syncToGoogleAppsScript("save_message", { roomId, message });
 
             broadcastToRoom(roomId, {
               type: "message:received",
@@ -605,6 +718,18 @@ async function startServer() {
     const raw = JSON.stringify(payloadObj);
     for (const [id, conn] of activeConnections.entries()) {
       if (excludeConnId && id === excludeConnId) continue;
+
+      // If this is an incoming call, suppress for recipients who have blocked the caller
+      if (payloadObj.type === "call:incoming" && payloadObj.caller && conn.username) {
+        const recipientNorm = conn.username.toLowerCase();
+        const callerNorm = payloadObj.caller.toLowerCase();
+        const userBlockedList = blockedUsersMap[recipientNorm] || [];
+        if (userBlockedList.some(b => b.toLowerCase() === callerNorm)) {
+          // Blocked: do not transmit incoming call ring
+          continue;
+        }
+      }
+
       // For system rooms or groups, standard membership validation
       if (conn.username && (room.members.includes(conn.username) || roomId === "general" || roomId === "tech")) {
         if (conn.socket.readyState === WebSocket.OPEN) {
@@ -614,35 +739,19 @@ async function startServer() {
     }
   }
 
-  // Setup APIs
+  // Setup CORS and JSON APIs
+  app.use((req, res, next) => {
+    res.header("Access-Control-Allow-Origin", "*");
+    res.header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
+    res.header("Access-Control-Allow-Headers", "Origin, X-Requested-With, Content-Type, Accept, Authorization");
+    if (req.method === "OPTIONS") {
+      return res.sendStatus(200);
+    }
+    next();
+  });
+
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
-
-  // In-memory persistent user accounts
-  const userAccounts: Record<string, {
-    email: string;
-    username: string;
-    passwordHash: string;
-    salt: string;
-    avatar: string;
-    rsaPublicKeyJwk: string;
-    rsaPrivateKeyJwk: string;
-    statusMessage?: string;
-  }> = {};
-
-  // In-memory friendship system
-  // Map of username (lowercase) to array of friend usernames (retaining exact case)
-  const friendshipList: Record<string, string[]> = {};
-  
-  // Pending friend requests
-  interface FriendRequest {
-    id: string;
-    sender: string;
-    receiver: string;
-    timestamp: number;
-    status: "pending" | "accepted" | "declined";
-  }
-  const friendRequests: FriendRequest[] = [];
 
   function hashPassword(password: string, salt: string): string {
     return crypto.pbkdf2Sync(password, salt, 100000, 64, "sha512").toString("hex");
@@ -694,6 +803,16 @@ async function startServer() {
         rsaPrivateKeyJwk: rsaPrivateKeyJwk || "none",
         statusMessage: ""
       };
+      triggerSave();
+
+      // Background sync to Google Apps Script (Sheet & Drive)
+      syncToGoogleAppsScript("register_user", {
+        email: normalizedEmail,
+        username: normalizedUsername,
+        avatar,
+        statusMessage: "",
+        registeredAt: new Date().toISOString()
+      });
 
       res.json({
         success: true,
@@ -795,6 +914,17 @@ async function startServer() {
           statusMessage: ""
         };
         userAccounts[normalizedEmail] = account;
+        triggerSave();
+
+        // Background sync to Google Apps Script
+        syncToGoogleAppsScript("register_user", {
+          email: normalizedEmail,
+          username: finalUsername,
+          avatar: photoURL || "🦊",
+          statusMessage: "",
+          registeredAt: new Date().toISOString(),
+          provider: "google"
+        });
       }
 
       res.json({
@@ -847,17 +977,22 @@ async function startServer() {
   app.post("/api/auth/update-profile", (req, res) => {
     try {
       const { email, username, avatar, oldPassword, newPassword, statusMessage } = req.body;
-      if (!email) {
-        return res.status(400).json({ error: "Email parameter is required to identify identity." });
+      const normalizedEmail = (email || "").trim().toLowerCase();
+      
+      // Look up account by email or username
+      let account = normalizedEmail ? userAccounts[normalizedEmail] : undefined;
+      if (!account && username) {
+        account = Object.values(userAccounts).find(
+          u => u.username.toLowerCase() === username.trim().toLowerCase()
+        );
       }
 
-      const normalizedEmail = email.trim().toLowerCase();
-      let account = userAccounts[normalizedEmail];
       if (!account) {
+        const effectiveEmail = normalizedEmail || `${(username || "user").toLowerCase().replace(/[^a-z0-9]/g, "") || "user"}@securechat.local`;
         const { rsaPublicKeyJwk, rsaPrivateKeyJwk } = req.body;
         const salt = generateSalt();
-        userAccounts[normalizedEmail] = {
-          email: normalizedEmail,
+        userAccounts[effectiveEmail] = {
+          email: effectiveEmail,
           username: (username || "Participant").trim().slice(0, 15),
           passwordHash: hashPassword("sess-restore-fallback-pwd", salt),
           salt,
@@ -866,7 +1001,7 @@ async function startServer() {
           rsaPrivateKeyJwk: rsaPrivateKeyJwk || "none",
           statusMessage: statusMessage !== undefined ? statusMessage.slice(0, 60) : ""
         };
-        account = userAccounts[normalizedEmail];
+        account = userAccounts[effectiveEmail];
       }
 
       // Check password change request
@@ -888,7 +1023,7 @@ async function startServer() {
         const newUsername = username.trim().slice(0, 15);
         if (newUsername.toLowerCase() !== account.username.toLowerCase()) {
           const usernameTaken = Object.values(userAccounts).some(
-            u => u.email !== normalizedEmail && u.username.toLowerCase() === newUsername.toLowerCase()
+            u => u.email !== account!.email && u.username.toLowerCase() === newUsername.toLowerCase()
           );
           if (usernameTaken) {
             return res.status(400).json({ error: "Requested username is already taken." });
@@ -904,24 +1039,34 @@ async function startServer() {
       if (statusMessage !== undefined) {
         account.statusMessage = statusMessage.slice(0, 60);
       }
+      triggerSave();
 
-      // Also proactively update metadata on the active Websocket connections if they exist
+      // Proactively synchronize updated profile to Google Apps Script Accounts tab
+      syncToGoogleAppsScript("register_user", {
+        email: account.email,
+        username: account.username,
+        avatar: account.avatar,
+        statusMessage: account.statusMessage || "",
+        registeredAt: new Date().toISOString()
+      });
+
+      // Proactively update metadata on active Websocket connections
       for (const [_, c] of activeConnections.entries()) {
-        if (c.username && c.username === account.username) {
+        if (c.username && c.username.toLowerCase() === account.username.toLowerCase()) {
           c.avatar = account.avatar;
           c.statusMessage = account.statusMessage || "";
-
-          // Broadcast updated presence to let everyone know immediately
-          broadcast({
-            type: "user:presence",
-            username: account.username,
-            publicKey: c.publicKey || "none",
-            avatar: account.avatar,
-            status: "online",
-            statusMessage: account.statusMessage || ""
-          });
         }
       }
+
+      // Broadcast updated presence to let everyone know immediately
+      broadcast({
+        type: "user:presence",
+        username: account.username,
+        publicKey: "none",
+        avatar: account.avatar,
+        status: "online",
+        statusMessage: account.statusMessage || ""
+      });
 
       res.json({
         success: true,
@@ -1015,6 +1160,7 @@ async function startServer() {
       };
       
       friendRequests.push(newRequest);
+      triggerSave();
       
       // Broadcast WebSocket notification so the companion gets an immediate alert
       broadcast({
@@ -1126,6 +1272,8 @@ async function startServer() {
         }
       }
       
+      triggerSave();
+      
       broadcast({
         type: "friend:request_accepted",
         request,
@@ -1158,6 +1306,7 @@ async function startServer() {
       }
       
       request.status = "declined";
+      triggerSave();
       
       broadcast({
         type: "friend:request_declined",
@@ -1171,8 +1320,250 @@ async function startServer() {
     }
   });
 
+  // Block a user
+  app.post("/api/friends/block", (req, res) => {
+    try {
+      const { username, blockedUsername } = req.body;
+      if (!username || !blockedUsername) {
+        return res.status(400).json({ error: "Username and target user are required." });
+      }
+
+      const uNorm = username.trim().toLowerCase();
+      const bNorm = blockedUsername.trim();
+
+      if (uNorm === bNorm.toLowerCase()) {
+        return res.status(400).json({ error: "You cannot block yourself." });
+      }
+
+      if (!blockedUsersMap[uNorm]) {
+        blockedUsersMap[uNorm] = [];
+      }
+
+      if (!blockedUsersMap[uNorm].some(b => b.toLowerCase() === bNorm.toLowerCase())) {
+        blockedUsersMap[uNorm].push(bNorm);
+      }
+
+      triggerSave();
+
+      res.json({ success: true, blockedUsers: blockedUsersMap[uNorm] });
+    } catch (err) {
+      console.error("Block user error:", err);
+      res.status(500).json({ error: "Internal server error." });
+    }
+  });
+
+  // Unblock a user
+  app.post("/api/friends/unblock", (req, res) => {
+    try {
+      const { username, unblockedUsername } = req.body;
+      if (!username || !unblockedUsername) {
+        return res.status(400).json({ error: "Username and unblocked target user are required." });
+      }
+
+      const uNorm = username.trim().toLowerCase();
+      const unNorm = unblockedUsername.trim().toLowerCase();
+
+      if (blockedUsersMap[uNorm]) {
+        blockedUsersMap[uNorm] = blockedUsersMap[uNorm].filter(b => b.toLowerCase() !== unNorm);
+      } else {
+        blockedUsersMap[uNorm] = [];
+      }
+
+      triggerSave();
+
+      res.json({ success: true, blockedUsers: blockedUsersMap[uNorm] });
+    } catch (err) {
+      console.error("Unblock user error:", err);
+      res.status(500).json({ error: "Internal server error." });
+    }
+  });
+
+  // Get blocked users list
+  app.get("/api/friends/blocked-list", (req, res) => {
+    try {
+      const username = req.query.username as string;
+      if (!username) {
+        return res.status(400).json({ error: "Username parameter is required." });
+      }
+
+      const uNorm = username.trim().toLowerCase();
+      const blocked = blockedUsersMap[uNorm] || [];
+      res.json({ success: true, blockedUsers: blocked });
+    } catch (err) {
+      console.error("Get blocked users error:", err);
+      res.status(500).json({ error: "Internal server error." });
+    }
+  });
+
+  // ==============================================================================
+  // GOOGLE APPS SCRIPT / SHEET & DRIVE INTEGRATION ENDPOINTS
+  // ==============================================================================
+
+  // Upload file / photo to Google Drive and log into Google Sheet
+  app.post("/api/appscript/upload", async (req, res) => {
+    try {
+      const { base64, fileName, mimeType, uploader, roomId } = req.body;
+      if (!base64) {
+        return res.status(400).json({ success: false, error: "Missing required base64 file data." });
+      }
+
+      if (!dynamicAppsScriptUrl) {
+        // Fallback if Apps Script URL is not configured yet
+        return res.json({
+          success: true,
+          isLocalFallback: true,
+          fileUrl: base64,
+          fileName: fileName || "file",
+          message: "Saved locally. Add APPS_SCRIPT_URL to .env for automatic Google Drive cloud storage."
+        });
+      }
+
+      // Proxy request to Google Apps Script Web App
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 25000); // 25s timeout for large uploads
+
+      const scriptResponse = await fetch(dynamicAppsScriptUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action: "upload_media",
+          base64,
+          fileName: fileName || `upload_${Date.now()}.bin`,
+          mimeType: mimeType || "application/octet-stream",
+          sender: uploader || "anonymous",
+          roomId: roomId || "general"
+        }),
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      const result = await scriptResponse.json();
+      res.json(result);
+    } catch (err: any) {
+      console.error("Apps Script upload proxy error:", err);
+      // Fallback to local Data URI if Google Drive fails so user can still chat smoothly
+      res.json({
+        success: true,
+        isFallback: true,
+        fileUrl: req.body.base64,
+        fileName: req.body.fileName,
+        error: err.message || "Google Drive upload timed out, preserved locally."
+      });
+    }
+  });
+
+  // Get current status of Google Apps Script, Sheet, and Drive
+  app.get("/api/appscript/status", async (req, res) => {
+    if (!dynamicAppsScriptUrl) {
+      return res.json({
+        connected: false,
+        configured: false,
+        message: "APPS_SCRIPT_URL is not set. Set it in .env or via Settings to enable Google Sheets & Drive sync."
+      });
+    }
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+      const scriptRes = await fetch(`${dynamicAppsScriptUrl}?action=json`, { signal: controller.signal });
+      clearTimeout(timeoutId);
+      const data = await scriptRes.json();
+      res.json({
+        connected: true,
+        configured: true,
+        url: dynamicAppsScriptUrl,
+        ...data
+      });
+    } catch (err: any) {
+      res.json({
+        connected: false,
+        configured: true,
+        url: dynamicAppsScriptUrl,
+        error: err.message || "Could not reach Google Apps Script Web App."
+      });
+    }
+  });
+
+  // Dynamically configure Apps Script Web App URL
+  app.post("/api/appscript/set-url", async (req, res) => {
+    try {
+      const { url } = req.body;
+      if (!url || typeof url !== "string") {
+        return res.status(400).json({ success: false, error: "Valid Apps Script URL required." });
+      }
+
+      dynamicAppsScriptUrl = url.trim();
+      triggerSave();
+
+      // Test connectivity
+      try {
+        const testRes = await fetch(`${dynamicAppsScriptUrl}?action=json`);
+        const testData = await testRes.json();
+        return res.json({
+          success: true,
+          connected: true,
+          url: dynamicAppsScriptUrl,
+          data: testData
+        });
+      } catch (testErr: any) {
+        return res.json({
+          success: true,
+          connected: false,
+          url: dynamicAppsScriptUrl,
+          warning: "URL saved, but initial ping test failed: " + (testErr.message || testErr)
+        });
+      }
+    } catch (err: any) {
+      console.error("Set Apps Script URL error:", err);
+      res.status(500).json({ success: false, error: err.message || "Failed to set Apps Script URL." });
+    }
+  });
+
+  // Manually trigger full bidirectional sync
+  app.post("/api/appscript/sync-all", async (req, res) => {
+    if (!dynamicAppsScriptUrl) {
+      return res.status(400).json({ success: false, error: "APPS_SCRIPT_URL not configured." });
+    }
+
+    try {
+      // Sync all accounts
+      for (const account of Object.values(userAccounts)) {
+        await syncToGoogleAppsScript("register_user", {
+          email: account.email,
+          username: account.username,
+          avatar: account.avatar,
+          statusMessage: account.statusMessage || "",
+          registeredAt: new Date().toISOString()
+        });
+      }
+
+      // Sync all rooms
+      for (const room of Object.values(rooms)) {
+        await syncToGoogleAppsScript("save_room", { room });
+      }
+
+      res.json({
+        success: true,
+        syncedAccounts: Object.keys(userAccounts).length,
+        syncedRooms: Object.keys(rooms).length
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
   app.get("/api/health", (req, res) => {
-    res.json({ status: "ok" });
+    res.json({
+      status: "ok",
+      uptime: process.uptime(),
+      connections: activeConnections.size,
+      roomsCount: Object.keys(rooms).length
+    });
+  });
+
+  // Explicitly return JSON 404 for any unmatched /api/* route so client never gets HTML 200
+  app.all("/api/*", (req, res) => {
+    res.status(404).json({ error: `API route ${req.method} ${req.path} not found.` });
   });
 
   // Serve static assets or mount Vite handler
@@ -1183,10 +1574,25 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.join(process.cwd(), "dist");
+    // Robust resolution of dist directory in production containers and standalone runs
+    let distPath = path.join(process.cwd(), "dist");
+    if (!fs.existsSync(distPath) && __dirname) {
+      const parentDist = path.resolve(__dirname, "..", "dist");
+      if (fs.existsSync(parentDist)) {
+        distPath = parentDist;
+      } else if (fs.existsSync(__dirname)) {
+        distPath = __dirname;
+      }
+    }
+
     app.use(express.static(distPath));
     app.get("*", (req, res) => {
-      res.sendFile(path.join(distPath, "index.html"));
+      const indexFile = path.join(distPath, "index.html");
+      if (fs.existsSync(indexFile)) {
+        res.sendFile(indexFile);
+      } else {
+        res.status(404).send("Application index.html build file not found. Ensure `npm run build` was executed.");
+      }
     });
   }
 

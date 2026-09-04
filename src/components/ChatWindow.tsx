@@ -1,9 +1,16 @@
 import React, { useState, useRef, useEffect } from "react";
-import { Send, Image, MessageSquare, Users, Paperclip, Loader, Info, User, ArrowLeft, X, Download, BarChart2, Plus, Trash2, List, Phone, Video, Check, CheckCheck, Pencil, Files, Forward, Bell, BellOff } from "lucide-react";
+import { 
+  Send, Image, MessageSquare, Users, Paperclip, Loader, Info, User, 
+  ArrowLeft, X, Download, BarChart2, Plus, Trash2, List, Phone, Video, 
+  Check, CheckCheck, Pencil, Files, Forward, Bell, BellOff, ZoomIn, 
+  ZoomOut, RotateCw, Copy, CheckCircle2, Sparkles, UploadCloud
+} from "lucide-react";
+import { motion, AnimatePresence } from "motion/react";
 import { Room, Message } from "../types";
 import AudioPlayer from "./AudioPlayer";
 import VoiceRecorder from "./VoiceRecorder";
 import { ThemeId, getTheme } from "../utils/theme";
+import { normalizeMediaUrl, getDriveThumbnailUrl, isImageContent } from "../utils/imageUtils";
 
 interface ChatWindowProps {
   activeRoom: Room | null;
@@ -28,6 +35,7 @@ interface ChatWindowProps {
   onUpdateRoomPrivacy?: (roomId: string, privacy: "public" | "private") => void;
   rooms?: Room[];
   onForwardMessage?: (message: Message, targetRoomId: string) => void;
+  blockedUsers?: string[];
 }
 
 export default function ChatWindow({
@@ -52,11 +60,16 @@ export default function ChatWindow({
   onUpdateRoomPrivacy,
   rooms = [],
   onForwardMessage,
+  blockedUsers = [],
 }: ChatWindowProps) {
   const [text, setText] = useState("");
   const [isSending, setIsSending] = useState(false);
   const [dragActive, setDragActive] = useState(false);
-  const [selectedImage, setSelectedImage] = useState<{ src: string; name: string } | null>(null);
+  const [selectedImage, setSelectedImage] = useState<{ src: string; name: string; sender?: string; timestamp?: number } | null>(null);
+  const [imageZoom, setImageZoom] = useState<number>(1);
+  const [imageRotation, setImageRotation] = useState<number>(0);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [uploadingFile, setUploadingFile] = useState<{ name: string; previewUrl?: string; isImage: boolean; size: number } | null>(null);
   const [showMediaGallery, setShowMediaGallery] = useState(false);
   const [galleryTab, setGalleryTab] = useState<"images" | "files">("images");
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
@@ -141,10 +154,15 @@ export default function ChatWindow({
     setShowPollCreator(false);
   };
 
+  // Filter messages from blocked users
+  const visibleMessages = messages.filter(
+    (msg) => !blockedUsers.some((b) => b.toLowerCase() === msg.sender?.toLowerCase())
+  );
+
   // Auto Scroll
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, typingUsers]);
+  }, [visibleMessages, typingUsers]);
 
   // Clean up typing status on change of room or unmount
   useEffect(() => {
@@ -216,10 +234,45 @@ export default function ChatWindow({
     }, 2000);
   };
 
+  const processAndSendFile = async (file: File) => {
+    const isImage = file.type.startsWith("image/") || /\.(png|jpe?g|gif|webp|svg|bmp)$/i.test(file.name);
+    let previewUrl = "";
+    if (isImage) {
+      try {
+        previewUrl = URL.createObjectURL(file);
+      } catch (err) {
+        console.warn("Could not create object URL preview", err);
+      }
+    }
+
+    setUploadingFile({
+      name: file.name,
+      previewUrl,
+      isImage,
+      size: file.size
+    });
+
+    try {
+      await onSendFile(file);
+    } catch (err) {
+      console.error("Upload error in ChatWindow:", err);
+    } finally {
+      setTimeout(() => {
+        setUploadingFile(null);
+        if (previewUrl) {
+          try {
+            URL.revokeObjectURL(previewUrl);
+          } catch (e) {}
+        }
+      }, 800);
+    }
+  };
+
   const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      await onSendFile(file);
+      await processAndSendFile(file);
+      e.target.value = "";
     }
   };
 
@@ -241,7 +294,7 @@ export default function ChatWindow({
 
     const file = e.dataTransfer.files?.[0];
     if (file) {
-      await onSendFile(file);
+      await processAndSendFile(file);
     }
   };
 
@@ -271,30 +324,22 @@ export default function ChatWindow({
     .trim();
 
   // Filter shared media (images and files)
-  const sharedMedia = messages.filter((msg) => {
+  const sharedMedia = visibleMessages.filter((msg) => {
     if (msg.isDeleted) return false;
     if (msg.isMedia) return true;
     
-    // Check if plain text message is a data image or normal image URL
-    const content = (msg.decryptedText || msg.ciphertext || "").trim();
-    const isImage = content.startsWith("data:image/") || /^(https?:\/\/.*\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico))(?:\?.*)?$/i.test(content);
-    return isImage;
+    const content = (msg.decryptedMediaUrl || msg.decryptedText || msg.ciphertext || "").trim();
+    return isImageContent(content, msg.mediaType, msg.fileName);
   });
 
   const sharedImages = sharedMedia.filter((msg) => {
-    if (msg.isMedia) {
-      return msg.mediaType?.startsWith("image/");
-    }
-    const content = (msg.decryptedText || msg.ciphertext || "").trim();
-    const isImage = content.startsWith("data:image/") || /^(https?:\/\/.*\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico))(?:\?.*)?$/i.test(content);
-    return isImage;
+    const content = (msg.decryptedMediaUrl || msg.decryptedText || msg.ciphertext || "").trim();
+    return isImageContent(content, msg.mediaType, msg.fileName);
   });
 
   const sharedFiles = sharedMedia.filter((msg) => {
-    if (msg.isMedia) {
-      return !msg.mediaType?.startsWith("image/");
-    }
-    return false;
+    const content = (msg.decryptedMediaUrl || msg.decryptedText || msg.ciphertext || "").trim();
+    return msg.isMedia && !isImageContent(content, msg.mediaType, msg.fileName);
   });
 
   return (
@@ -415,7 +460,7 @@ export default function ChatWindow({
 
       {/* Messages Scroll Panel */}
       <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
-        {messages.length === 0 ? (
+        {visibleMessages.length === 0 ? (
           <div className="flex flex-col items-center justify-center text-center h-full text-slate-600 select-none py-12">
             <MessageSquare className="w-10 h-10 text-slate-750 stroke-1 mb-2.5 animate-pulse" />
             <p className="text-xs font-medium">No messages in this chat stream yet.</p>
@@ -424,9 +469,9 @@ export default function ChatWindow({
             </p>
           </div>
         ) : (
-          messages.map((msg, index) => {
+          visibleMessages.map((msg, index) => {
             const isMe = msg.sender === currentUsername;
-            const prevMsg = index > 0 ? messages[index - 1] : null;
+            const prevMsg = index > 0 ? visibleMessages[index - 1] : null;
             
             const msgDate = new Date(msg.timestamp || Date.now()).toDateString();
             const prevMsgDate = prevMsg ? new Date(prevMsg.timestamp || Date.now()).toDateString() : null;
@@ -732,25 +777,47 @@ export default function ChatWindow({
                         ) : msg.isMedia ? (
                           <div>
                             {msg.decryptedMediaUrl || msg.ciphertext ? (
-                              (msg.mediaType?.startsWith("image/") || /\.(jpeg|jpg|gif|png|webp|svg)/i.test(msg.fileName || "")) ? (
-                                <div className="relative group/img max-w-full">
-                                  <img
-                                    src={msg.decryptedMediaUrl || msg.ciphertext}
-                                    alt={msg.fileName || "Shared image"}
-                                    referrerPolicy="no-referrer"
-                                    onClick={() => setSelectedImage({
-                                      src: msg.decryptedMediaUrl || msg.ciphertext || "",
-                                      name: msg.fileName || "Shared Image"
-                                    })}
-                                    className="max-h-60 rounded-xl max-w-full border border-slate-800 media-glow mb-1 bg-slate-950 object-contain hover:scale-[1.02] hover:brightness-110 transition-all cursor-pointer shadow-lg"
-                                  />
-                                  <div className="absolute bottom-2 right-2 opacity-0 group-hover/img:opacity-100 transition-opacity bg-slate-900/80 px-2 py-1 rounded text-[10px] text-slate-350 pointer-events-none select-none backdrop-blur-xs">
-                                    Click to expand
-                                  </div>
-                                </div>
+                              (msg.mediaType?.startsWith("image/") || /\.(jpeg|jpg|gif|png|webp|svg|bmp)/i.test(msg.fileName || "") || isImageContent(msg.decryptedMediaUrl || msg.ciphertext || "", msg.mediaType, msg.fileName)) ? (
+                                (() => {
+                                  const rawUrl = msg.decryptedMediaUrl || msg.ciphertext || "";
+                                  const displayUrl = normalizeMediaUrl(rawUrl);
+                                  return (
+                                    <div className="relative group/img max-w-full overflow-hidden rounded-xl">
+                                      <motion.img
+                                        initial={{ opacity: 0, scale: 0.95 }}
+                                        animate={{ opacity: 1, scale: 1 }}
+                                        transition={{ duration: 0.25 }}
+                                        src={displayUrl}
+                                        alt={msg.fileName || "Shared photo"}
+                                        referrerPolicy="no-referrer"
+                                        onError={(e) => {
+                                          const fallback = getDriveThumbnailUrl(rawUrl);
+                                          if (fallback && e.currentTarget.src !== fallback) {
+                                            e.currentTarget.src = fallback;
+                                          }
+                                        }}
+                                        onClick={() => {
+                                          setImageZoom(1);
+                                          setImageRotation(0);
+                                          setSelectedImage({
+                                            src: displayUrl,
+                                            name: msg.fileName || "Shared Photo",
+                                            sender: msg.sender,
+                                            timestamp: msg.timestamp
+                                          });
+                                        }}
+                                        className="max-h-72 rounded-xl max-w-full border border-slate-800 media-glow mb-1 bg-slate-950 object-contain hover:scale-[1.02] hover:brightness-105 transition-all cursor-pointer shadow-lg block"
+                                      />
+                                      <div className="absolute bottom-2 right-2 opacity-0 group-hover/img:opacity-100 transition-opacity bg-slate-900/90 text-slate-200 px-2.5 py-1 rounded-lg text-[10px] font-semibold pointer-events-none select-none backdrop-blur-md border border-white/10 flex items-center gap-1.5 shadow-lg">
+                                        <ZoomIn className="w-3 h-3 text-indigo-400" />
+                                        <span>Click to expand</span>
+                                      </div>
+                                    </div>
+                                  );
+                                })()
                               ) : (
                                 <a
-                                  href={msg.decryptedMediaUrl || msg.ciphertext}
+                                  href={normalizeMediaUrl(msg.decryptedMediaUrl || msg.ciphertext || "")}
                                   download={msg.fileName || "downloaded-file"}
                                   className={`inline-flex items-center gap-2 p-2 bg-slate-950 hover:bg-slate-950/60 transition-colors border ${theme.accentBorderMuted} ${theme.accentText} rounded-xl text-xs font-mono`}
                                 >
@@ -762,9 +829,9 @@ export default function ChatWindow({
                                 </a>
                               )
                             ) : (
-                              <div className="flex items-center gap-2 text-xs italic text-slate-400">
+                              <div className="flex items-center gap-2 text-xs italic text-slate-400 py-1">
                                 <Loader className={`w-3.5 h-3.5 animate-spin ${theme.accentText}`} />
-                                <span>Unpacking attachment...</span>
+                                <span>Unpacking photo attachment...</span>
                               </div>
                             )}
                           </div>
@@ -837,22 +904,38 @@ export default function ChatWindow({
                         ) : (
                           (() => {
                             const content = (msg.decryptedText || msg.ciphertext || "").trim();
-                            const isImage = content.startsWith("data:image/") || /^(https?:\/\/.*\.(?:png|jpg|jpeg|gif|webp|svg|bmp|ico))(?:\?.*)?$/i.test(content);
-                            if (isImage) {
+                            const isImg = isImageContent(content, undefined, undefined);
+                            if (isImg) {
+                              const displayUrl = normalizeMediaUrl(content);
                               return (
-                                <div className="relative group/img max-w-full">
-                                  <img
-                                    src={content}
-                                    alt="Shared image"
+                                <div className="relative group/img max-w-full overflow-hidden rounded-xl">
+                                  <motion.img
+                                    initial={{ opacity: 0, scale: 0.95 }}
+                                    animate={{ opacity: 1, scale: 1 }}
+                                    src={displayUrl}
+                                    alt="Shared Photo"
                                     referrerPolicy="no-referrer"
-                                    onClick={() => setSelectedImage({
-                                      src: content,
-                                      name: "Shared Image"
-                                    })}
-                                    className="max-h-60 rounded-xl max-w-full border border-slate-800 media-glow bg-slate-950 object-contain hover:scale-[1.02] hover:brightness-110 transition-all cursor-pointer shadow-lg"
+                                    onError={(e) => {
+                                      const fallback = getDriveThumbnailUrl(content);
+                                      if (fallback && e.currentTarget.src !== fallback) {
+                                        e.currentTarget.src = fallback;
+                                      }
+                                    }}
+                                    onClick={() => {
+                                      setImageZoom(1);
+                                      setImageRotation(0);
+                                      setSelectedImage({
+                                        src: displayUrl,
+                                        name: "Shared Photo",
+                                        sender: msg.sender,
+                                        timestamp: msg.timestamp
+                                      });
+                                    }}
+                                    className="max-h-72 rounded-xl max-w-full border border-slate-800 media-glow bg-slate-950 object-contain hover:scale-[1.02] hover:brightness-105 transition-all cursor-pointer shadow-lg block"
                                   />
-                                  <div className="absolute bottom-2 right-2 opacity-0 group-hover/img:opacity-100 transition-opacity bg-slate-900/80 px-2 py-1 rounded text-[10px] text-slate-350 pointer-events-none select-none backdrop-blur-xs">
-                                    Click to expand
+                                  <div className="absolute bottom-2 right-2 opacity-0 group-hover/img:opacity-100 transition-opacity bg-slate-900/90 text-slate-200 px-2.5 py-1 rounded-lg text-[10px] font-semibold pointer-events-none select-none backdrop-blur-md border border-white/10 flex items-center gap-1.5 shadow-lg">
+                                    <ZoomIn className="w-3 h-3 text-indigo-400" />
+                                    <span>Click to expand</span>
                                   </div>
                                 </div>
                               );
@@ -929,6 +1012,60 @@ export default function ChatWindow({
           <span className="text-xs text-slate-500">Share instantly with the chat feed</span>
         </div>
       )}
+
+      {/* Uploading Photo / File Feedback Banner */}
+      <AnimatePresence>
+        {uploadingFile && (
+          <motion.div
+            initial={{ opacity: 0, y: 10, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 10, scale: 0.96 }}
+            transition={{ type: "spring", stiffness: 450, damping: 30 }}
+            className="px-4 pb-2 z-10"
+          >
+            <div className="flex items-center justify-between p-2.5 bg-slate-900/95 border border-indigo-500/35 rounded-2xl shadow-xl backdrop-blur-md">
+              <div className="flex items-center gap-3 min-w-0">
+                {uploadingFile.isImage && uploadingFile.previewUrl ? (
+                  <div className="relative w-10 h-10 rounded-xl overflow-hidden shrink-0 border border-indigo-500/40 shadow-inner bg-slate-950">
+                    <img
+                      src={uploadingFile.previewUrl}
+                      alt={uploadingFile.name}
+                      className="w-full h-full object-cover animate-pulse"
+                    />
+                    <div className="absolute inset-0 bg-indigo-500/10" />
+                  </div>
+                ) : (
+                  <div className="w-10 h-10 rounded-xl bg-indigo-500/15 border border-indigo-500/30 flex items-center justify-center shrink-0 text-indigo-400">
+                    <UploadCloud className="w-5 h-5 animate-bounce" />
+                  </div>
+                )}
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-slate-100 truncate max-w-[160px] sm:max-w-[240px]">
+                      {uploadingFile.name}
+                    </span>
+                    <span className="text-[9px] font-mono text-indigo-400 font-semibold bg-indigo-500/10 px-2 py-0.5 rounded-full border border-indigo-500/20">
+                      {((uploadingFile.size || 0) / 1024).toFixed(1)} KB
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <Loader className="w-3 h-3 animate-spin text-emerald-400 shrink-0" />
+                    <span className="text-[10px] text-slate-350 font-medium animate-pulse">
+                      {uploadingFile.isImage ? "Optimizing & uploading photo..." : "Uploading file to drive & sheet..."}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 pl-2">
+                <span className="text-[10px] font-bold text-emerald-400 hidden sm:flex items-center gap-1 bg-emerald-500/10 px-2.5 py-1 rounded-lg border border-emerald-500/20">
+                  <Sparkles className="w-3 h-3" /> Real-time
+                </span>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Send Input Panel */}
       <footer className={`p-4 border-t ${theme.borderColor} ${theme.bgSidebar} bg-opacity-20 shrink-0`}>
@@ -1043,16 +1180,26 @@ export default function ChatWindow({
               ) : (
                 <div className="grid grid-cols-2 gap-2.5">
                   {sharedImages.map((msg, idx) => {
-                    const src = msg.isMedia 
-                      ? (msg.decryptedMediaUrl || msg.ciphertext) 
+                    const rawSrc = msg.isMedia 
+                      ? (msg.decryptedMediaUrl || msg.ciphertext || "") 
                       : (msg.decryptedText || msg.ciphertext || "").trim();
-                    const name = msg.fileName || "Shared Image";
+                    const src = normalizeMediaUrl(rawSrc);
+                    const name = msg.fileName || "Shared Photo";
                     
                     return (
                       <div 
                         key={msg.id || idx}
                         className="relative group/gallery-item aspect-square rounded-xl overflow-hidden border border-slate-800 bg-slate-950 cursor-pointer shadow-md hover:scale-[1.03] transition-all animate-fadeIn"
-                        onClick={() => setSelectedImage({ src, name })}
+                        onClick={() => {
+                          setImageZoom(1);
+                          setImageRotation(0);
+                          setSelectedImage({ 
+                            src, 
+                            name,
+                            sender: msg.sender,
+                            timestamp: msg.timestamp
+                          });
+                        }}
                         title={`Shared by @${msg.sender}`}
                       >
                         <img 
@@ -1060,6 +1207,12 @@ export default function ChatWindow({
                           alt={name} 
                           className="w-full h-full object-cover group-hover/gallery-item:brightness-110 transition-all"
                           referrerPolicy="no-referrer"
+                          onError={(e) => {
+                            const fallback = getDriveThumbnailUrl(rawSrc);
+                            if (fallback && e.currentTarget.src !== fallback) {
+                              e.currentTarget.src = fallback;
+                            }
+                          }}
                         />
                         <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-transparent to-transparent opacity-0 group-hover/gallery-item:opacity-100 transition-all flex flex-col justify-end p-2 pointer-events-none">
                           <p className="text-[9px] font-semibold text-white truncate">@{msg.sender}</p>
@@ -1082,7 +1235,8 @@ export default function ChatWindow({
               ) : (
                 <div className="space-y-2">
                   {sharedFiles.map((msg, idx) => {
-                    const url = msg.decryptedMediaUrl || msg.ciphertext;
+                    const rawUrl = msg.decryptedMediaUrl || msg.ciphertext || "";
+                    const url = normalizeMediaUrl(rawUrl);
                     const name = msg.fileName || "downloaded-file";
                     
                     return (
@@ -1124,55 +1278,132 @@ export default function ChatWindow({
         </div>
       )}
 
-      {/* Full-screen Image Preview Modal */}
-      {selectedImage && (
-        <div 
-          className="fixed inset-0 z-[120] flex flex-col items-center justify-center bg-slate-950/95 backdrop-blur-md animate-fadeIn p-4"
-          onClick={() => setSelectedImage(null)}
-        >
-          {/* Top header controls */}
-          <div className="absolute top-4 left-4 right-4 flex items-center justify-between z-30 select-none">
-            <h4 className="text-xs font-mono text-slate-350 truncate max-w-[70%] bg-slate-900/60 px-3 py-1.5 rounded-full border border-white/5">
-              {selectedImage.name}
-            </h4>
-            <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-              <a
-                href={selectedImage.src}
-                download={selectedImage.name}
-                className="p-2.5 bg-slate-900/80 hover:bg-slate-800 border border-slate-800 text-slate-350 hover:text-white rounded-full transition-all active:scale-95 flex items-center justify-center"
-                title="Download original file"
-              >
-                <Download className="w-4 h-4" />
-              </a>
-              <button
-                onClick={() => setSelectedImage(null)}
-                className="p-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full transition-all active:scale-95 flex items-center justify-center shadow-lg cursor-pointer"
-                title="Close"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-          </div>
-
-          {/* Centered Image Container */}
-          <div 
-            className="relative max-w-full max-h-[85vh] flex items-center justify-center"
-            onClick={(e) => e.stopPropagation()}
+      {/* Enhanced Full-screen Animated Image Preview Lightbox */}
+      <AnimatePresence>
+        {selectedImage && (
+          <motion.div 
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[120] flex flex-col items-center justify-center bg-slate-955/95 backdrop-blur-md p-4 select-none"
+            onClick={() => setSelectedImage(null)}
           >
-            <img
-              src={selectedImage.src}
-              alt={selectedImage.name}
-              referrerPolicy="no-referrer"
-              className="max-w-full max-h-[80vh] md:max-h-[85vh] rounded-2xl object-scale-down border border-slate-800 shadow-2xl transition-transform"
-            />
-          </div>
+            {/* Top Header Controls Bar */}
+            <div className="absolute top-4 left-4 right-4 flex items-center justify-between z-30" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center gap-3 max-w-[60%]">
+                <div className="bg-slate-900/80 px-3.5 py-1.5 rounded-full border border-white/10 flex items-center gap-2 truncate">
+                  <Image className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+                  <span className="text-xs font-mono text-slate-200 truncate">{selectedImage.name}</span>
+                  {selectedImage.sender && (
+                    <span className="text-[10px] text-slate-400 font-sans">by @{selectedImage.sender}</span>
+                  )}
+                </div>
+              </div>
 
-          {/* Footnote instruction */}
-          <div className="absolute bottom-4 text-center text-[10px] text-slate-500 font-mono select-none pointer-events-none">
-            Press [ESC] or click anywhere outside to exit
-          </div>
-        </div>
-      )}
+              {/* Action Toolbar */}
+              <div className="flex items-center gap-2">
+                {/* Zoom In */}
+                <button
+                  type="button"
+                  onClick={() => setImageZoom((prev) => Math.min(prev + 0.25, 3))}
+                  className="p-2 bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white rounded-full border border-white/10 transition-all cursor-pointer"
+                  title="Zoom In"
+                >
+                  <ZoomIn className="w-4 h-4" />
+                </button>
+
+                {/* Zoom Out */}
+                <button
+                  type="button"
+                  onClick={() => setImageZoom((prev) => Math.max(prev - 0.25, 0.5))}
+                  className="p-2 bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white rounded-full border border-white/10 transition-all cursor-pointer"
+                  title="Zoom Out"
+                >
+                  <ZoomOut className="w-4 h-4" />
+                </button>
+
+                {/* Rotate */}
+                <button
+                  type="button"
+                  onClick={() => setImageRotation((prev) => (prev + 90) % 360)}
+                  className="p-2 bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white rounded-full border border-white/10 transition-all cursor-pointer"
+                  title="Rotate 90°"
+                >
+                  <RotateCw className="w-4 h-4" />
+                </button>
+
+                {/* Copy Link */}
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(selectedImage.src);
+                      setCopiedLink(true);
+                      setTimeout(() => setCopiedLink(false), 2000);
+                    } catch (e) {
+                      console.warn("Could not copy link", e);
+                    }
+                  }}
+                  className="p-2 bg-slate-900/80 hover:bg-slate-800 text-slate-300 hover:text-white rounded-full border border-white/10 transition-all cursor-pointer"
+                  title="Copy Direct Image Link"
+                >
+                  {copiedLink ? <CheckCircle2 className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                </button>
+
+                {/* Download */}
+                <a
+                  href={selectedImage.src}
+                  download={selectedImage.name}
+                  className="p-2 bg-slate-900/80 hover:bg-slate-800 border border-white/10 text-slate-300 hover:text-white rounded-full transition-all flex items-center justify-center cursor-pointer"
+                  title="Download image file"
+                >
+                  <Download className="w-4 h-4" />
+                </a>
+
+                {/* Close */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedImage(null)}
+                  className="p-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-full transition-all flex items-center justify-center shadow-lg cursor-pointer"
+                  title="Close (ESC)"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* Centered Image Container with Spring Zoom/Rotate */}
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              transition={{ type: "spring", stiffness: 300, damping: 25 }}
+              className="relative max-w-full max-h-[82vh] flex items-center justify-center overflow-hidden p-2"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <img
+                src={selectedImage.src}
+                alt={selectedImage.name}
+                referrerPolicy="no-referrer"
+                style={{
+                  transform: `scale(${imageZoom}) rotate(${imageRotation}deg)`,
+                  transition: "transform 0.2s cubic-bezier(0.2, 0, 0, 1)"
+                }}
+                className="max-w-full max-h-[78vh] rounded-2xl object-scale-down border border-slate-800/80 shadow-2xl"
+              />
+            </motion.div>
+
+            {/* Bottom Controls / Status Bar */}
+            <div className="absolute bottom-4 flex items-center gap-3 text-[10px] text-slate-400 font-mono select-none pointer-events-none bg-slate-900/60 px-3.5 py-1 rounded-full border border-white/5">
+              <span>Zoom: {Math.round(imageZoom * 100)}%</span>
+              <span>•</span>
+              <span>Rotation: {imageRotation}°</span>
+              <span>•</span>
+              <span>Press [ESC] to exit</span>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Create Poll Dialog Modal */}
       {showPollCreator && (

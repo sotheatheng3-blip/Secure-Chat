@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from "react";
-import { X, Search, UserPlus, Check, Ban, MessageSquare, Loader, Users, Inbox, Sparkles, UserCheck } from "lucide-react";
+import { X, Search, UserPlus, Check, Ban, MessageSquare, Loader, Users, Inbox, Sparkles, UserCheck, ShieldAlert, ShieldCheck } from "lucide-react";
 import { Friend, FriendRequest } from "../types";
 import { ThemeId, getTheme } from "../utils/theme";
+import { apiRequest } from "../utils/api";
 
 interface FriendsModalProps {
   isOpen: boolean;
@@ -11,6 +12,8 @@ interface FriendsModalProps {
   onStartPrivateChat: (friendUsername: string) => Promise<void>;
   // Socket signal trigger to sync up parent state or fetch on demand
   onRefreshRooms?: () => void;
+  blockedUsers?: string[];
+  onBlockedUsersChange?: (blocked: string[]) => void;
 }
 
 export default function FriendsModal({
@@ -20,10 +23,13 @@ export default function FriendsModal({
   activeThemeId,
   onStartPrivateChat,
   onRefreshRooms,
+  blockedUsers = [],
+  onBlockedUsersChange,
 }: FriendsModalProps) {
-  const [tab, setTab] = useState<"friends" | "requests" | "add">("friends");
+  const [tab, setTab] = useState<"friends" | "requests" | "add" | "blocked">("friends");
   const [friends, setFriends] = useState<Friend[]>([]);
   const [requests, setRequests] = useState<FriendRequest[]>([]);
+  const [localBlocked, setLocalBlocked] = useState<string[]>(blockedUsers);
   const [searchQuery, setSearchQuery] = useState("");
   const [friendsSearchQuery, setFriendsSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<any[]>([]);
@@ -34,14 +40,27 @@ export default function FriendsModal({
 
   const theme = getTheme(activeThemeId);
 
-  // Fetch status of friends and requests
+  // Sync external blocked users
+  useEffect(() => {
+    setLocalBlocked(blockedUsers);
+  }, [blockedUsers]);
+
+  // Fetch status of friends, requests and blocked list
   const fetchFriendsStatus = async () => {
     try {
-      const res = await fetch(`/api/friends/status?username=${encodeURIComponent(currentUsername)}`);
-      const data = await res.json();
-      if (data.success) {
-        setFriends(data.friends || []);
-        setRequests(data.requests || []);
+      const res = await apiRequest(`/api/friends/status?username=${encodeURIComponent(currentUsername)}`);
+      if (res.ok && res.data?.success) {
+        setFriends(res.data.friends || []);
+        setRequests(res.data.requests || []);
+      }
+
+      // Fetch blocked list
+      const blockRes = await apiRequest(`/api/friends/blocked-list?username=${encodeURIComponent(currentUsername)}`);
+      if (blockRes.ok && blockRes.data?.success && Array.isArray(blockRes.data.blockedUsers)) {
+        setLocalBlocked(blockRes.data.blockedUsers);
+        if (onBlockedUsersChange) {
+          onBlockedUsersChange(blockRes.data.blockedUsers);
+        }
       }
     } catch (err) {
       console.error("Failed to load friend status:", err);
@@ -62,16 +81,14 @@ export default function FriendsModal({
     setIsSearching(true);
     setErrorText(null);
     try {
-      const res = await fetch("/api/users/search", {
+      const res = await apiRequest("/api/users/search", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: searchQuery, currentUsername }),
       });
-      const data = await res.json();
-      if (data.success) {
-        setSearchResults(data.users || []);
+      if (res.ok && res.data?.success) {
+        setSearchResults(res.data.users || []);
       } else {
-        setErrorText(data.error || "Search failed.");
+        setErrorText(res.error || "Search failed.");
       }
     } catch (err) {
       setErrorText("Failed to search. Service offline.");
@@ -96,17 +113,15 @@ export default function FriendsModal({
     setErrorText(null);
     setSuccessText(null);
     try {
-      const res = await fetch("/api/friends/request/send", {
+      const res = await apiRequest("/api/friends/request/send", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ sender: currentUsername, receiver: targetUsername }),
       });
-      const data = await res.json();
-      if (data.success) {
+      if (res.ok && res.data?.success) {
         setSuccessText(`Request successfully sent to @${targetUsername}!`);
         fetchFriendsStatus();
       } else {
-        setErrorText(data.error || "Request failed.");
+        setErrorText(res.error || "Request failed.");
       }
     } catch (err) {
       setErrorText("Failed to dispatch request.");
@@ -121,18 +136,16 @@ export default function FriendsModal({
     setErrorText(null);
     setSuccessText(null);
     try {
-      const res = await fetch("/api/friends/request/accept", {
+      const res = await apiRequest("/api/friends/request/accept", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ requestId: reqId, username: currentUsername }),
       });
-      const data = await res.json();
-      if (data.success) {
+      if (res.ok && res.data?.success) {
         setSuccessText(`Successfully established friendship with @${senderName}!`);
         fetchFriendsStatus();
         if (onRefreshRooms) onRefreshRooms();
       } else {
-        setErrorText(data.error || "Failed to accept.");
+        setErrorText(res.error || "Failed to accept.");
       }
     } catch (err) {
       setErrorText("Acceptance request failed.");
@@ -146,18 +159,77 @@ export default function FriendsModal({
     setActionLoadingId(reqId);
     setErrorText(null);
     try {
-      const res = await fetch("/api/friends/request/decline", {
+      const res = await apiRequest("/api/friends/request/decline", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ requestId: reqId, username: currentUsername }),
       });
-      const data = await res.json();
-      if (data.success) {
+      if (res.ok && res.data?.success) {
         setSuccessText("Friend request declined/cancelled.");
         fetchFriendsStatus();
       }
     } catch (err) {
       setErrorText("Decline failed.");
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  // Handle Blocking a User
+  const handleBlockUser = async (targetUsername: string) => {
+    if (!window.confirm(`Are you sure you want to block @${targetUsername}? You will not receive any messages or calls from them.`)) {
+      return;
+    }
+    setActionLoadingId(`block-${targetUsername}`);
+    setErrorText(null);
+    setSuccessText(null);
+
+    try {
+      const res = await apiRequest("/api/friends/block", {
+        method: "POST",
+        body: JSON.stringify({ username: currentUsername, blockedUsername: targetUsername }),
+      });
+
+      const updated = res.ok && Array.isArray(res.data?.blockedUsers)
+        ? res.data.blockedUsers
+        : Array.from(new Set([...localBlocked, targetUsername]));
+
+      setLocalBlocked(updated);
+      localStorage.setItem("secure_chat_blocked_users", JSON.stringify(updated));
+      if (onBlockedUsersChange) {
+        onBlockedUsersChange(updated);
+      }
+      setSuccessText(`Blocked @${targetUsername}. Messages and incoming calls from this user are now hidden.`);
+    } catch (err) {
+      setErrorText("Failed to block user.");
+    } finally {
+      setActionLoadingId(null);
+    }
+  };
+
+  // Handle Unblocking a User
+  const handleUnblockUser = async (targetUsername: string) => {
+    setActionLoadingId(`unblock-${targetUsername}`);
+    setErrorText(null);
+    setSuccessText(null);
+
+    try {
+      const res = await apiRequest("/api/friends/unblock", {
+        method: "POST",
+        body: JSON.stringify({ username: currentUsername, unblockedUsername: targetUsername }),
+      });
+
+      const updated = res.ok && Array.isArray(res.data?.blockedUsers)
+        ? res.data.blockedUsers
+        : localBlocked.filter(b => b.toLowerCase() !== targetUsername.toLowerCase());
+
+      setLocalBlocked(updated);
+      localStorage.setItem("secure_chat_blocked_users", JSON.stringify(updated));
+      if (onBlockedUsersChange) {
+        onBlockedUsersChange(updated);
+      }
+      setSuccessText(`Unblocked @${targetUsername}.`);
+    } catch (err) {
+      setErrorText("Failed to unblock user.");
     } finally {
       setActionLoadingId(null);
     }
@@ -198,24 +270,24 @@ export default function FriendsModal({
         <div className="flex border-b border-white/5 bg-black/10 p-1 shrink-0">
           <button
             onClick={() => setTab("friends")}
-            className={`flex-1 py-3 text-xs font-semibold rounded-2xl flex items-center justify-center gap-2 transition-all cursor-pointer ${
+            className={`flex-1 py-3 text-xs font-semibold rounded-2xl flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
               tab === "friends"
                 ? `${theme.accentBgMuted} ${theme.accentText} border ${theme.accentBorderMuted}`
                 : "text-slate-400 hover:text-slate-200"
             }`}
           >
-            <Sparkles className="w-4 h-4" />
-            My Friends ({friends.length})
+            <Sparkles className="w-3.5 h-3.5" />
+            Friends ({friends.length})
           </button>
           <button
             onClick={() => setTab("requests")}
-            className={`flex-1 py-3 text-xs font-semibold rounded-2xl flex items-center justify-center gap-2 transition-all cursor-pointer relative ${
+            className={`flex-1 py-3 text-xs font-semibold rounded-2xl flex items-center justify-center gap-1.5 transition-all cursor-pointer relative ${
               tab === "requests"
                 ? `${theme.accentBgMuted} ${theme.accentText} border ${theme.accentBorderMuted}`
                 : "text-slate-400 hover:text-slate-200"
             }`}
           >
-            <Inbox className="w-4 h-4" />
+            <Inbox className="w-3.5 h-3.5" />
             Requests
             {incomingRequests.length > 0 && (
               <span className="absolute top-2 right-2 flex h-2 w-2">
@@ -226,14 +298,25 @@ export default function FriendsModal({
           </button>
           <button
             onClick={() => setTab("add")}
-            className={`flex-1 py-3 text-xs font-semibold rounded-2xl flex items-center justify-center gap-2 transition-all cursor-pointer ${
+            className={`flex-1 py-3 text-xs font-semibold rounded-2xl flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
               tab === "add"
                 ? `${theme.accentBgMuted} ${theme.accentText} border ${theme.accentBorderMuted}`
                 : "text-slate-400 hover:text-slate-200"
             }`}
           >
-            <UserPlus className="w-4 h-4" />
-            Add Friend
+            <UserPlus className="w-3.5 h-3.5" />
+            Add
+          </button>
+          <button
+            onClick={() => setTab("blocked")}
+            className={`flex-1 py-3 text-xs font-semibold rounded-2xl flex items-center justify-center gap-1.5 transition-all cursor-pointer ${
+              tab === "blocked"
+                ? "bg-red-500/15 text-red-400 border border-red-500/30"
+                : "text-slate-400 hover:text-slate-200"
+            }`}
+          >
+            <Ban className="w-3.5 h-3.5" />
+            Blocked ({localBlocked.length})
           </button>
         </div>
 
@@ -295,44 +378,74 @@ export default function FriendsModal({
               ) : (
                 friends
                   .filter(friend => friend.username.toLowerCase().includes(friendsSearchQuery.toLowerCase()))
-                  .map((friend) => (
-                    <div
-                      key={friend.username}
-                      className={`flex items-center justify-between p-3.5 rounded-2xl bg-black/15 border ${theme.borderColor} hover:bg-black/25 transition-all`}
-                    >
-                      <div className="flex items-center gap-3 min-w-0">
-                        <div className="relative shrink-0">
-                          <div className="w-10 h-10 rounded-full overflow-hidden bg-slate-800 flex items-center justify-center text-base border border-slate-700/50">
-                            {friend.avatar && (friend.avatar.startsWith("data:image") || friend.avatar.startsWith("http")) ? (
-                              <img src={friend.avatar} alt={friend.username} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                            ) : (
-                              friend.avatar || "🦊"
-                            )}
+                  .map((friend) => {
+                    const isBlocked = localBlocked.some(b => b.toLowerCase() === friend.username.toLowerCase());
+                    return (
+                      <div
+                        key={friend.username}
+                        className={`flex items-center justify-between p-3.5 rounded-2xl bg-black/15 border ${theme.borderColor} hover:bg-black/25 transition-all`}
+                      >
+                        <div className="flex items-center gap-3 min-w-0">
+                          <div className="relative shrink-0">
+                            <div className="w-10 h-10 rounded-full overflow-hidden bg-slate-800 flex items-center justify-center text-base border border-slate-700/50">
+                              {friend.avatar && (friend.avatar.startsWith("data:image") || friend.avatar.startsWith("http")) ? (
+                                <img src={friend.avatar} alt={friend.username} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                              ) : (
+                                friend.avatar || "🦊"
+                              )}
+                            </div>
+                            <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 ${theme.bgForm} ${friend.status === "online" ? "bg-emerald-400" : "bg-slate-500"}`} />
                           </div>
-                          <span className={`absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full border-2 ${theme.bgForm} ${friend.status === "online" ? "bg-emerald-400" : "bg-slate-500"}`} />
+                          <div className="min-w-0">
+                            <div className="flex items-center gap-1.5">
+                              <p className="text-sm font-semibold text-slate-100 truncate">@{friend.username}</p>
+                              {isBlocked && (
+                                <span className="text-[10px] bg-red-500/20 text-red-400 border border-red-500/30 px-1.5 py-0.2 rounded font-mono">Blocked</span>
+                              )}
+                            </div>
+                            <div className="flex flex-col gap-0.5">
+                              <span className="text-[10px] text-slate-500 capitalize leading-none">{friend.status}</span>
+                              {friend.statusMessage && (
+                                <p className="text-[11px] text-slate-400 italic truncate max-w-[200px] mt-0.5" title={friend.statusMessage}>
+                                  "{friend.statusMessage}"
+                                </p>
+                              )}
+                            </div>
+                          </div>
                         </div>
-                        <div className="min-w-0">
-                          <p className="text-sm font-semibold text-slate-100 truncate">@{friend.username}</p>
-                          <div className="flex flex-col gap-0.5">
-                            <span className="text-[10px] text-slate-500 capitalize leading-none">{friend.status}</span>
-                            {friend.statusMessage && (
-                              <p className="text-[11px] text-slate-400 italic truncate max-w-[200px] mt-0.5" title={friend.statusMessage}>
-                                "{friend.statusMessage}"
-                              </p>
-                            )}
-                          </div>
+
+                        <div className="flex items-center gap-2">
+                          <button
+                            onClick={() => handleFriendsChat(friend.username)}
+                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 hover:text-indigo-300 text-xs font-semibold cursor-pointer border border-indigo-500/20 active:scale-95 transition-transform`}
+                          >
+                            <MessageSquare className="w-3.5 h-3.5" />
+                            Chat
+                          </button>
+
+                          {isBlocked ? (
+                            <button
+                              onClick={() => handleUnblockUser(friend.username)}
+                              disabled={actionLoadingId !== null}
+                              className="p-1.5 text-xs text-red-400 hover:text-emerald-400 hover:bg-emerald-500/10 rounded-lg border border-red-500/20 hover:border-emerald-500/20 transition-all cursor-pointer"
+                              title="Unblock user"
+                            >
+                              <ShieldCheck className="w-4 h-4" />
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => handleBlockUser(friend.username)}
+                              disabled={actionLoadingId !== null}
+                              className="p-1.5 text-xs text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg border border-transparent hover:border-red-500/20 transition-all cursor-pointer"
+                              title="Block user (hide messages & calls)"
+                            >
+                              <Ban className="w-4 h-4" />
+                            </button>
+                          )}
                         </div>
                       </div>
-
-                      <button
-                        onClick={() => handleFriendsChat(friend.username)}
-                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-400 hover:text-indigo-300 text-xs font-semibold cursor-pointer border border-indigo-500/20 active:scale-95 transition-transform`}
-                      >
-                        <MessageSquare className="w-3.5 h-3.5" />
-                        Chat
-                      </button>
-                    </div>
-                  ))
+                    );
+                  })
               )}
             </div>
           )}
@@ -469,6 +582,7 @@ export default function FriendsModal({
                     const isFriend = friends.some(f => f.username.toLowerCase() === user.username.toLowerCase());
                     const incomingReq = incomingRequests.find(r => r.sender.toLowerCase() === user.username.toLowerCase());
                     const outgoingReq = outgoingRequests.find(r => r.receiver.toLowerCase() === user.username.toLowerCase());
+                    const isBlocked = localBlocked.some(b => b.toLowerCase() === user.username.toLowerCase());
 
                     return (
                       <div
@@ -490,7 +604,7 @@ export default function FriendsModal({
                         </div>
 
                         {/* Action Buttons */}
-                        <div className="shrink-0">
+                        <div className="shrink-0 flex items-center gap-1.5">
                           {isFriend ? (
                             <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-400 px-2.5 py-1 bg-emerald-500/10 border border-emerald-500/20 rounded-xl">
                               <UserCheck className="w-3.5 h-3.5" />
@@ -503,11 +617,11 @@ export default function FriendsModal({
                               className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-semibold flex items-center gap-1 cursor-pointer transition-all active:scale-95"
                             >
                               <Check className="w-3.5 h-3.5" />
-                              Accept Request
+                              Accept
                             </button>
                           ) : outgoingReq ? (
                             <span className="inline-block text-[11px] font-medium text-yellow-500 px-2.5 py-1 bg-yellow-500/10 border border-yellow-500/20 rounded-xl uppercase">
-                              Pending Response
+                              Pending
                             </span>
                           ) : (
                             <button
@@ -520,7 +634,25 @@ export default function FriendsModal({
                               ) : (
                                 <UserPlus className="w-3.5 h-3.5" />
                               )}
-                              Add Friend
+                              Add
+                            </button>
+                          )}
+
+                          {isBlocked ? (
+                            <button
+                              onClick={() => handleUnblockUser(user.username)}
+                              className="p-1.5 text-xs text-red-400 hover:text-emerald-400 hover:bg-emerald-500/10 rounded-lg border border-red-500/20 transition-all cursor-pointer"
+                              title="Unblock user"
+                            >
+                              <ShieldCheck className="w-3.5 h-3.5" />
+                            </button>
+                          ) : (
+                            <button
+                              onClick={() => handleBlockUser(user.username)}
+                              className="p-1.5 text-xs text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded-lg border border-transparent hover:border-red-500/20 transition-all cursor-pointer"
+                              title="Block user"
+                            >
+                              <Ban className="w-3.5 h-3.5" />
                             </button>
                           )}
                         </div>
@@ -529,6 +661,62 @@ export default function FriendsModal({
                   })
                 )}
               </div>
+            </div>
+          )}
+
+          {/* TAB 4: BLOCKED USERS */}
+          {tab === "blocked" && (
+            <div className="space-y-4">
+              <div className="p-3 rounded-2xl bg-red-500/10 border border-red-500/20 flex items-start gap-2.5 text-xs text-red-300 leading-relaxed">
+                <ShieldAlert className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <span>
+                  Blocked users cannot contact you. All incoming messages, direct chat threads, and incoming audio/video calls from blocked users will be hidden.
+                </span>
+              </div>
+
+              {localBlocked.length === 0 ? (
+                <div className="text-center py-12 select-none border border-dashed border-white/5 rounded-2xl bg-black/5">
+                  <div className="w-12 h-12 rounded-full bg-slate-800/40 flex items-center justify-center mx-auto mb-3 text-slate-500">
+                    <ShieldCheck className="w-6 h-6 text-emerald-400" />
+                  </div>
+                  <h4 className="text-sm font-semibold text-slate-300">No Blocked Users</h4>
+                  <p className="text-xs text-slate-500 mt-1 max-w-xs mx-auto">
+                    You haven't blocked anyone yet. You can block any user from your friends list or directory search.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {localBlocked.map((blockedName) => (
+                    <div
+                      key={blockedName}
+                      className={`flex items-center justify-between p-3.5 rounded-2xl bg-black/15 border ${theme.borderColor}`}
+                    >
+                      <div className="flex items-center gap-3">
+                        <div className="w-9 h-9 rounded-full bg-red-950/40 border border-red-500/30 flex items-center justify-center text-sm text-red-400 font-bold">
+                          {blockedName.charAt(0).toUpperCase()}
+                        </div>
+                        <div>
+                          <p className="text-xs font-semibold text-slate-200">@{blockedName}</p>
+                          <span className="text-[10px] text-red-400/80">Messages & calls hidden</span>
+                        </div>
+                      </div>
+
+                      <button
+                        onClick={() => handleUnblockUser(blockedName)}
+                        disabled={actionLoadingId === `unblock-${blockedName}`}
+                        className="px-3 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 hover:text-white text-xs font-semibold border border-slate-700 cursor-pointer flex items-center gap-1.5 transition-all active:scale-95"
+                      >
+                        {actionLoadingId === `unblock-${blockedName}` ? (
+                          <Loader className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+                        )}
+                        Unblock
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
         </div>
