@@ -1,0 +1,106 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Space+Grotesk:wght@400;500;600;700&family=Fira+Code:wght@400;500&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-display: "Space Grotesk", sans-serif;
+  --font-mono: "Fira Code", monospace;
+
+  /* Custom palette colors for a superior night/dark slate interface */
+  --color-slate-900: #0f172a;
+  --color-slate-800: #1e293b;
+  --color-slate-750: #243147;
+  --color-slate-700: #334155;
+  --color-indigo-500: #6366f1;
+  --color-indigo-400: #818cf8;
+}
+
+/* Custom scrollbar rules for the conversations lists and message threads */
+::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.2);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.4);
+}
+
+/* Additional utility layouts for interactive canvas / message bubbles */
+.media-glow {
+  box-shadow: 0 0 20px rgba(99, 102, 241, 0.15);
+}
+
+@keyframes wave {
+  0%, 100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+.wave-bar {
+  animation: wave 1.2s ease-in-out infinite;
+}
+
+/* Accessibility settings support overrides */
+.font-dyslexic-active {
+  font-family: 'Comic Sans MS', 'Courier New', cursive, sans-serif !important;
+  letter-spacing: 0.04em !important;
+  word-spacing: 0.12em !important;
+  line-height: 1.7 !important;
+}
+
+.font-size-small {
+  font-size: 13px !important;
+}
+.font-size-normal {
+  font-size: 14px !important;
+}
+.font-size-large {
+  font-size: 16px !important;
+}
+.font-size-xlarge {
+  font-size: 18px !important;
+}
+
+.spacing-expanded {
+  letter-spacing: 0.06em !important;
+  word-spacing: 0.14em !important;
+}
+
+.reduce-motion-active,
+.reduce-motion-active * {
+  animation: none !important;
+  transition: none !important;
+  transition-duration: 0s !important;
+  animation-duration: 0s !important;
+}
+
+.high-contrast-active {
+  --color-slate-900: #020617 !important;
+  --color-slate-800: #0f172a !important;
+}
+.high-contrast-active div,
+.high-contrast-active button,
+.high-contrast-active input {
+  border-color: rgba(255, 255, 255, 0.4) !important;
+}
+.high-contrast-active button:hover {
+  background-color: #4f46e5 !important;
+  color: #ffffff !important;
+}
+.high-contrast-active p,
+.high-contrast-active span {
+  color: #f8fafc !important;
+}
+
